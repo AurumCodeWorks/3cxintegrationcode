@@ -1,0 +1,20 @@
+name = "3cx-salesforce-proxy"
+main = "src/index.js"
+compatibility_date = "2024-03-01"
+
+# All configuration is managed in the Cloudflare dashboard so it can be
+# edited without redeploying (Workers & Pages -> 3cx-salesforce-proxy ->
+# Settings -> Variables and Secrets):
+#   - SALESFORCE_LOGIN_URL       (plaintext variable)
+#   - SALESFORCE_ORG_MODEL       (plaintext variable: contact|personaccount|lead)
+#   - SALESFORCE_EXTRA_FIELDS    (plaintext variable: JSON per object type)
+#   - HOME_COUNTRY               (plaintext variable, default GB)
+#   - MIN_SEARCH_LENGTH          (plaintext variable, default 3)
+#   - CALL_MERGE_WINDOW_MINUTES  (plaintext variable, default 5, 0 disables)
+#   - SALESFORCE_EXTERNAL_ID_FIELD (plaintext variable, e.g. Phone_E164__c)
+#   - ALERT_WEBHOOK_URL          (plaintext variable, optional failure alerts)
+#   - PROXY_API_KEY              (secret)
+#   - SALESFORCE_CLIENT_ID       (secret)
+#   - SALESFORCE_CLIENT_SECRET   (secret)
+# keep_vars prevents `wrangler deploy` from wiping dashboard-managed values.
+keep_vars = true

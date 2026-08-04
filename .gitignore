@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+dist/
+
+# Wrangler's local secret store — never commit Salesforce credentials
+.dev.vars
+.env
+
+*.log
+.DS_Store

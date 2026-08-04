@@ -1,0 +1,949 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="US" Name="CloudflareSalesforceProxy" Version="39" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
+  <!-- MaxLength intentionally empty: pass the FULL caller number to the proxy.
+       [MaxLength] would truncate to the PBX "match length" setting (e.g. last 7
+       digits), which breaks Salesforce lookups and E.164 contact creation. -->
+  <Number Prefix="Off" MaxLength="" />
+  <Connection MaxConcurrentRequests="16" />
+  <Parameters>
+    <Parameter Name="WorkerUrl" Type="String" Parent="General Configuration" Editor="String" Title="Cloudflare Worker URL:" Validation="" Default="https://3cx-salesforce-proxy.autumn-truth-82d5.workers.dev" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ApiKey" Type="Password" Parent="General Configuration" Editor="String" Title="Proxy API Key (PROXY_API_KEY):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="LookupOrder" Type="List" Parent="General Configuration" Editor="String" Title="Contact Lookup Order:" Validation="" Default="Contacts/Leads/Accounts" ListValues="Contacts/Leads/Accounts,Contacts/Accounts/Leads,Leads/Accounts/Contacts,Leads/Contacts/Accounts,Accounts/Contacts/Leads,Accounts/Leads/Contacts" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    
+    <!-- Time-Based Automation Policies (Dropdown List) -->
+    <Parameter Name="AutoCreatePolicy" Type="List" Parent="General Configuration" Editor="String" Title="Auto-Create Unsaved Contacts:" Default="Always On" ListValues="Always On,After-Hours Only,Disabled" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="BusinessHoursStart" Type="String" Parent="General Configuration" Editor="String" Title="Office Opens (HH:MM):" Validation="" Default="09:00" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="BusinessHoursEnd" Type="String" Parent="General Configuration" Editor="String" Title="Office Closes (HH:MM):" Validation="" Default="17:00" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+
+    <!-- Call Filtering: keeps internal transfers and their transcripts out of the CRM -->
+    <Parameter Name="JournalInbound" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Answered Inbound Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="JournalMissed" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Missed Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="JournalOutbound" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Answered Outbound Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="JournalUnanswered" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Unanswered Outbound Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="InternalMaxDigits" Type="String" Parent="General Configuration" Editor="String" Title="Internal Extension Max Digits:" Validation="" Default="6" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ExcludedPrefixes" Type="String" Parent="General Configuration" Editor="String" Title="Excluded Number Prefixes (comma separated):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="TranscriptPolicy" Type="List" Parent="General Configuration" Editor="String" Title="Store Call Transcripts:" Validation="" Default="Include full transcript" ListValues="Include full transcript,Metadata only,External inbound only" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+
+    <Parameter Name="ReportCallEnabled" Type="Boolean" Parent="" Editor="String" Title="Enable Call Journaling" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="Subject" Type="String" Parent="ReportCallEnabled" Editor="String" Title="Call Subject:" Validation="" Default="3CX PhoneSystem Call" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="InboundCallText" Type="String" Parent="ReportCallEnabled" Editor="String" Title="Answered Inbound Call:" Validation="" Default="[DateTime]: Answered incoming call from [Number] [Name] to [Agent] ([Duration])[LineBreak][LineBreak]Transcription: [Transcription][LineBreak][LineBreak]Summary: [Summary][LineBreak][LineBreak]Sentiment: [Sentiment][LineBreak][LineBreak]Recording: [RecordingUrl]" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="MissedCallText" Type="String" Parent="ReportCallEnabled" Editor="String" Title="Missed Call:" Validation="" Default="[DateTime]: Missed call from [Number] [Name] to [Agent]" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="OutboundCallText" Type="String" Parent="ReportCallEnabled" Editor="String" Title="Answered Outbound Call:" Validation="" Default="[DateTime]: Answered outgoing call from [Agent] to [Number] [Name] ([Duration])[LineBreak][LineBreak]Transcription: [Transcription][LineBreak][LineBreak]Summary: [Summary][LineBreak][LineBreak]Sentiment: [Sentiment][LineBreak][LineBreak]Recording: [RecordingUrl]" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="NotAnsweredOutboundCallText" Type="String" Parent="ReportCallEnabled" Editor="String" Title="Unanswered Outbound Call:" Validation="" Default="[DateTime]: Unanswered outgoing call from [Agent] to [Number] [Name]" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ReportChatEnabled" Type="Boolean" Parent="" Editor="String" Title="Enable Chat Journaling" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ChatSubject" Type="String" Parent="ReportChatEnabled" Editor="String" Title="Chat Subject:" Validation="" Default="3CX PhoneSystem Chat Session" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="CreateContactEnabled" Type="Boolean" Parent="" Editor="String" Title="Allow contact creation directly to your CRM using 3CX Client apps" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="CreateLeadOrContact" Type="List" Parent="CreateContactEnabled" Editor="String" Title="Create Lead or Contact:" Validation="" Default="Contact" ListValues="Lead,Contact" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="CreateContactCompany" Type="String" Parent="CreateContactEnabled" Editor="String" Title="New Lead Company:" Validation="" Default="3CX Ltd" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+  </Parameters>
+  <Authentication Type="No" />
+  <Scenarios>
+    <Scenario Id="" Type="REST" EntityId="Contacts" EntityOrder="[LookupOrder]">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[Number]} IN PHONE FIELDS RETURNING Contact(Id,FirstName,LastName,Title,Department,AssistantPhone,Fax,HomePhone,MobilePhone,OtherPhone,Phone,Email,AccountId)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="searchRecords.attributes.type"><Filter /></Variable>
+        <Variable Name="FirstName" LookupValue="" Path="searchRecords.FirstName"><Filter /></Variable>
+        <Variable Name="LastName" LookupValue="" Path="searchRecords.LastName"><Filter /></Variable>
+        <Variable Name="Title" LookupValue="" Path="searchRecords.Title"><Filter /></Variable>
+        <Variable Name="Department" LookupValue="" Path="searchRecords.Department"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="searchRecords.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="searchRecords.MobilePhone"><Filter /></Variable>
+        <Variable Name="HomePhone" LookupValue="" Path="searchRecords.HomePhone"><Filter /></Variable>
+        <Variable Name="AssistantPhone" LookupValue="" Path="searchRecords.AssistantPhone"><Filter /></Variable>
+        <Variable Name="OtherPhone" LookupValue="" Path="searchRecords.OtherPhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="searchRecords.Fax"><Filter /></Variable>
+        <Variable Name="Email" LookupValue="" Path="searchRecords.Email"><Filter /></Variable>
+        <Variable Name="AccountId" LookupValue="" Path="searchRecords.AccountId"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="GetAccountName" AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="" Type="REST" EntityId="Leads" EntityOrder="[LookupOrder]">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[Number]} IN PHONE FIELDS RETURNING Lead(Id,FirstName,LastName,Title,Fax,MobilePhone,Phone,Email,Company)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="searchRecords.attributes.type"><Filter /></Variable>
+        <Variable Name="FirstName" LookupValue="" Path="searchRecords.FirstName"><Filter /></Variable>
+        <Variable Name="LastName" LookupValue="" Path="searchRecords.LastName"><Filter /></Variable>
+        <Variable Name="Title" LookupValue="" Path="searchRecords.Title"><Filter /></Variable>
+        <Variable Name="AccountName" LookupValue="" Path="searchRecords.Company"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="searchRecords.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="searchRecords.MobilePhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="searchRecords.Fax"><Filter /></Variable>
+        <Variable Name="Email" LookupValue="" Path="searchRecords.Email"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="FirstName" Passes="0" Value="[FirstName]" />
+        <Output Type="LastName" Passes="0" Value="[LastName]" />
+        <Output Type="Title" Passes="0" Value="[Title]" />
+        <Output Type="CompanyName" Passes="0" Value="[AccountName]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Phone]" />
+        <Output Type="PhoneMobile" Passes="0" Value="[MobilePhone]" />
+        <Output Type="FaxBusiness" Passes="0" Value="[Fax]" />
+        <Output Type="Email" Passes="0" Value="[Email]" />
+        <Output Type="EntityType" Passes="0" Value="[EntityType]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="" Type="REST" EntityId="Accounts" EntityOrder="[LookupOrder]">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[Number]} IN PHONE FIELDS RETURNING Account(Id,Name,Fax,Phone)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="searchRecords.attributes.type"><Filter /></Variable>
+        <Variable Name="AccountName" LookupValue="" Path="searchRecords.Name"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="searchRecords.Phone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="records.Fax"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="CompanyName" Passes="0" Value="[AccountName]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Phone]" />
+        <Output Type="FaxBusiness" Passes="0" Value="[Fax]" />
+        <Output Type="EntityType" Passes="0" Value="[EntityType]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="LookupByEmail_Contacts" Type="REST" EntityId="Contacts" EntityOrder="[LookupOrder]">
+      <Request SkipIf="[IIf([FoundRecordCount]&gt;0,True,False)]" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[[Email].Replace(&quot;+&quot;,&quot;\%2B&quot;)]} IN EMAIL FIELDS RETURNING Contact(Id,FirstName,LastName,Title,Department,AssistantPhone,Fax,HomePhone,MobilePhone,OtherPhone,Phone,Email,AccountId)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="searchRecords.attributes.type"><Filter /></Variable>
+        <Variable Name="FirstName" LookupValue="" Path="searchRecords.FirstName"><Filter /></Variable>
+        <Variable Name="LastName" LookupValue="" Path="searchRecords.LastName"><Filter /></Variable>
+        <Variable Name="Title" LookupValue="" Path="searchRecords.Title"><Filter /></Variable>
+        <Variable Name="Department" LookupValue="" Path="searchRecords.Department"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="searchRecords.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="searchRecords.MobilePhone"><Filter /></Variable>
+        <Variable Name="HomePhone" LookupValue="" Path="searchRecords.HomePhone"><Filter /></Variable>
+        <Variable Name="AssistantPhone" LookupValue="" Path="searchRecords.AssistantPhone"><Filter /></Variable>
+        <Variable Name="OtherPhone" LookupValue="" Path="searchRecords.OtherPhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="searchRecords.Fax"><Filter /></Variable>
+        <Variable Name="Email" LookupValue="" Path="searchRecords.Email"><Filter /></Variable>
+        <Variable Name="AccountId" LookupValue="" Path="searchRecords.AccountId"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="GetAccountName" AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="LookupByEmail_Leads" Type="REST" EntityId="Leads" EntityOrder="[LookupOrder]">
+      <Request SkipIf="[IIf([FoundRecordCount]&gt;0,True,False)]" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[[Email].Replace(&quot;+&quot;,&quot;\%2B&quot;)]} IN EMAIL FIELDS RETURNING Lead(Id,FirstName,LastName,Title,Fax,MobilePhone,Phone,Email,Company)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="searchRecords.attributes.type"><Filter /></Variable>
+        <Variable Name="FirstName" LookupValue="" Path="searchRecords.FirstName"><Filter /></Variable>
+        <Variable Name="LastName" LookupValue="" Path="searchRecords.LastName"><Filter /></Variable>
+        <Variable Name="Title" LookupValue="" Path="searchRecords.Title"><Filter /></Variable>
+        <Variable Name="AccountName" LookupValue="" Path="searchRecords.Company"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="searchRecords.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="searchRecords.MobilePhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="searchRecords.Fax"><Filter /></Variable>
+        <Variable Name="Email" LookupValue="" Path="searchRecords.Email"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="FirstName" Passes="0" Value="[FirstName]" />
+        <Output Type="LastName" Passes="0" Value="[LastName]" />
+        <Output Type="Title" Passes="0" Value="[Title]" />
+        <Output Type="CompanyName" Passes="0" Value="[AccountName]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Phone]" />
+        <Output Type="PhoneMobile" Passes="0" Value="[MobilePhone]" />
+        <Output Type="FaxBusiness" Passes="0" Value="[Fax]" />
+        <Output Type="Email" Passes="0" Value="[Email]" />
+        <Output Type="EntityType" Passes="0" Value="[EntityType]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="LookupByEmail_Accounts" Type="REST" EntityId="Accounts" EntityOrder="[LookupOrder]">
+      <Request SkipIf="[IIf([FoundRecordCount]&gt;0,True,False)]" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[[Email].Replace(&quot;+&quot;,&quot;\%2B&quot;)]} IN EMAIL FIELDS RETURNING Account(Id,Name,Fax,Phone)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="searchRecords.attributes.type"><Filter /></Variable>
+        <Variable Name="AccountName" LookupValue="" Path="searchRecords.Name"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="searchRecords.Phone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="searchRecords.Fax"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="CompanyName" Passes="0" Value="[AccountName]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Phone]" />
+        <Output Type="FaxBusiness" Passes="0" Value="[Fax]" />
+        <Output Type="Email" Passes="0" Value="[Email]" />
+        <Output Type="EntityType" Passes="0" Value="[EntityType]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="GetAccountName" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Name from Account where Id = '[AccountId]'" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Name</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="AccName" LookupValue="" Path="records.Name"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="true">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="FirstName" Passes="0" Value="[FirstName]" />
+        <Output Type="LastName" Passes="0" Value="[LastName]" />
+        <Output Type="Title" Passes="0" Value="[Title]" />
+        <Output Type="Department" Passes="0" Value="[Department]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Phone]" />
+        <Output Type="PhoneBusiness2" Passes="0" Value="[AssistantPhone]" />
+        <Output Type="PhoneOther" Passes="0" Value="[OtherPhone]" />
+        <Output Type="PhoneMobile" Passes="0" Value="[MobilePhone]" />
+        <Output Type="PhoneHome" Passes="0" Value="[HomePhone]" />
+        <Output Type="FaxBusiness" Passes="0" Value="[Fax]" />
+        <Output Type="CompanyName" Passes="0" Value="[AccName]" />
+        <Output Type="Email" Passes="0" Value="[Email]" />
+        <Output Type="EntityType" Passes="0" Value="[EntityType]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="SearchContacts_PhoneEmailFirstLastName" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Id,FirstName,LastName,Title,Department,AssistantPhone,Fax,HomePhone,MobilePhone,OtherPhone,Phone,Email,AccountId FROM Contact WHERE FirstName LIKE '%25[EscapedSearchText]%25' OR LastName LIKE '%25[EscapedSearchText]%25' OR AssistantPhone LIKE '%25[EscapedSearchText]%25' OR Fax LIKE '%25[EscapedSearchText]%25' OR HomePhone LIKE '%25[EscapedSearchText]%25' OR MobilePhone LIKE '%25[EscapedSearchText]%25' OR OtherPhone LIKE '%25[EscapedSearchText]%25' OR Phone LIKE '%25[EscapedSearchText]%25' OR Email LIKE '%25[EscapedSearchText]%25' LIMIT [MaxCount]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="records.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="records.attributes.type"><Filter /></Variable>
+        <Variable Name="FirstName" LookupValue="" Path="records.FirstName"><Filter /></Variable>
+        <Variable Name="LastName" LookupValue="" Path="records.LastName"><Filter /></Variable>
+        <Variable Name="Title" LookupValue="" Path="records.Title"><Filter /></Variable>
+        <Variable Name="Department" LookupValue="" Path="records.Department"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="records.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="records.MobilePhone"><Filter /></Variable>
+        <Variable Name="HomePhone" LookupValue="" Path="records.HomePhone"><Filter /></Variable>
+        <Variable Name="AssistantPhone" LookupValue="" Path="records.AssistantPhone"><Filter /></Variable>
+        <Variable Name="OtherPhone" LookupValue="" Path="records.OtherPhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="records.Fax"><Filter /></Variable>
+        <Variable Name="Email" LookupValue="" Path="records.Email"><Filter /></Variable>
+        <Variable Name="AccountId" LookupValue="" Path="records.AccountId"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="GetAccountName" AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="SearchContacts_CompanyName" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Id, Name FROM Account WHERE Name LIKE '%25[EscapedSearchText]%25' LIMIT [MaxCount]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="AccountId" LookupValue="" Path="records.Id"><Filter /></Variable>
+        <Variable Name="AccountName" LookupValue="" Path="records.Name"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="GetContactsForAccount" AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="GetContactsForAccount" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Id,FirstName,LastName,Title,Department,AssistantPhone,Fax,HomePhone,MobilePhone,OtherPhone,Phone,Email FROM Contact WHERE AccountId = '[AccountId]'" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="records.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="records.attributes.type"><Filter /></Variable>
+        <Variable Name="FirstName" LookupValue="" Path="records.FirstName"><Filter /></Variable>
+        <Variable Name="LastName" LookupValue="" Path="records.LastName"><Filter /></Variable>
+        <Variable Name="Title" LookupValue="" Path="records.Title"><Filter /></Variable>
+        <Variable Name="Department" LookupValue="" Path="records.Department"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="records.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="records.MobilePhone"><Filter /></Variable>
+        <Variable Name="HomePhone" LookupValue="" Path="records.HomePhone"><Filter /></Variable>
+        <Variable Name="AssistantPhone" LookupValue="" Path="records.AssistantPhone"><Filter /></Variable>
+        <Variable Name="OtherPhone" LookupValue="" Path="records.OtherPhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="records.Fax"><Filter /></Variable>
+        <Variable Name="Email" LookupValue="" Path="records.Email"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="FirstName" Passes="0" Value="[FirstName]" />
+        <Output Type="LastName" Passes="0" Value="[LastName]" />
+        <Output Type="Title" Passes="0" Value="[Title]" />
+        <Output Type="Department" Passes="0" Value="[Department]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Phone]" />
+        <Output Type="PhoneBusiness2" Passes="0" Value="[AssistantPhone]" />
+        <Output Type="PhoneOther" Passes="0" Value="[OtherPhone]" />
+        <Output Type="PhoneMobile" Passes="0" Value="[MobilePhone]" />
+        <Output Type="PhoneHome" Passes="0" Value="[HomePhone]" />
+        <Output Type="FaxBusiness" Passes="0" Value="[Fax]" />
+        <Output Type="CompanyName" Passes="0" Value="[AccountName]" />
+        <Output Type="Email" Passes="0" Value="[Email]" />
+        <Output Type="EntityType" Passes="0" Value="[EntityType]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="SearchContacts_Leads" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Id,FirstName,LastName,Title,Fax,MobilePhone,Phone,Email,Company FROM Lead WHERE Company LIKE '%25[EscapedSearchText]%25' OR FirstName LIKE '%25[EscapedSearchText]%25' OR LastName LIKE '%25[EscapedSearchText]%25' OR Fax LIKE '%25[EscapedSearchText]%25' OR MobilePhone LIKE '%25[EscapedSearchText]%25' OR Phone LIKE '%25[EscapedSearchText]%25' OR Email LIKE '%25[EscapedSearchText]%25' LIMIT [MaxCount]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="records.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="records.attributes.type"><Filter /></Variable>
+        <Variable Name="FirstName" LookupValue="" Path="records.FirstName"><Filter /></Variable>
+        <Variable Name="LastName" LookupValue="" Path="records.LastName"><Filter /></Variable>
+        <Variable Name="Title" LookupValue="" Path="records.Title"><Filter /></Variable>
+        <Variable Name="AccountName" LookupValue="" Path="records.Company"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="records.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="records.MobilePhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="records.Fax"><Filter /></Variable>
+        <Variable Name="Email" LookupValue="" Path="records.Email"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="FirstName" Passes="0" Value="[FirstName]" />
+        <Output Type="LastName" Passes="0" Value="[LastName]" />
+        <Output Type="Title" Passes="0" Value="[Title]" />
+        <Output Type="CompanyName" Passes="0" Value="[AccountName]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Phone]" />
+        <Output Type="PhoneMobile" Passes="0" Value="[MobilePhone]" />
+        <Output Type="FaxBusiness" Passes="0" Value="[Fax]" />
+        <Output Type="Email" Passes="0" Value="[Email]" />
+        <Output Type="EntityType" Passes="0" Value="[EntityType]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="SearchContacts_Accounts" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Id,Name,Fax,Phone FROM Account WHERE Name LIKE '%25[EscapedSearchText]%25' OR Fax LIKE '%25[EscapedSearchText]%25' OR Phone LIKE '%25[EscapedSearchText]%25' LIMIT [MaxCount]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="records.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="records.attributes.type"><Filter /></Variable>
+        <Variable Name="AccountName" LookupValue="" Path="records.Name"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="records.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="records.MobilePhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="records.Fax"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="CompanyName" Passes="0" Value="[AccountName]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Phone]" />
+        <Output Type="FaxBusiness" Passes="0" Value="[Fax]" />
+        <Output Type="EntityType" Passes="0" Value="[EntityType]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="GetAllContacts" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Id,FirstName,LastName,Title,Department,AssistantPhone,Fax,HomePhone,MobilePhone,OtherPhone,Phone,Email,AccountId FROM Contact LIMIT [PageSize] OFFSET [[Page]*[PageSize]]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="records.Id"><Filter /></Variable>
+        <Variable Name="EntityType" LookupValue="" Path="records.attributes.type"><Filter /></Variable>
+        <Variable Name="FirstName" LookupValue="" Path="records.FirstName"><Filter /></Variable>
+        <Variable Name="LastName" LookupValue="" Path="records.LastName"><Filter /></Variable>
+        <Variable Name="Title" LookupValue="" Path="records.Title"><Filter /></Variable>
+        <Variable Name="Department" LookupValue="" Path="records.Department"><Filter /></Variable>
+        <Variable Name="Phone" LookupValue="" Path="records.Phone"><Filter /></Variable>
+        <Variable Name="MobilePhone" LookupValue="" Path="records.MobilePhone"><Filter /></Variable>
+        <Variable Name="HomePhone" LookupValue="" Path="records.HomePhone"><Filter /></Variable>
+        <Variable Name="AssistantPhone" LookupValue="" Path="records.AssistantPhone"><Filter /></Variable>
+        <Variable Name="OtherPhone" LookupValue="" Path="records.OtherPhone"><Filter /></Variable>
+        <Variable Name="Fax" LookupValue="" Path="records.Fax"><Filter /></Variable>
+        <Variable Name="Email" LookupValue="" Path="records.Email"><Filter /></Variable>
+        <Variable Name="AccountId" LookupValue="" Path="records.AccountId"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="GetAccountName" AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="ReportCall" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="[ReportCallEnabled]!=True||[EntityId]==&quot;&quot;" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Id from User where Email = '[AgentEmail]'" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="OwnerId" LookupValue="" Path="records.Id"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="CreateCallActivity" AllowEmpty="true" />
+    </Scenario>
+    <Scenario Id="CreateCallActivity" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="[ReportCallEnabled]!=True||[EntityId]==&quot;&quot;" Url="[WorkerUrl]/services/data/v55.0/sobjects/task" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="Json" RequestType="Post" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+        <PostValues Key="" If="" SkipIf="">
+          <Value Key="Subject" If="" SkipIf="" Passes="2" Type="String">[[Subject]]</Value>
+          <Value Key="Status" If="" SkipIf="" Passes="0" Type="String">Completed</Value>
+          <Value Key="Priority" If="" SkipIf="" Passes="0" Type="String">Normal</Value>
+          <Value Key="TaskSubtype" If="" SkipIf="" Passes="0" Type="String">Call</Value>
+          <Value Key="ActivityDate" If="" SkipIf="" Passes="0" Type="String">[[CallStartTimeUTC].ToString("yyyy-MM-dd")]</Value>
+          <Value Key="CallDurationInSeconds" If="" SkipIf="" Passes="0" Type="String">[[[DurationTimespan].get_TotalSeconds()].ToString("F0")]</Value>
+          <Value Key="CallType" If="[CallType]==Inbound" SkipIf="" Passes="2" Type="String">Inbound</Value>
+          <Value Key="CallType" If="[CallType]==Missed" SkipIf="" Passes="2" Type="String">Inbound</Value>
+          <Value Key="CallType" If="[CallType]==Outbound" SkipIf="" Passes="2" Type="String">Outbound</Value>
+          <Value Key="CallType" If="[CallType]==Notanswered" SkipIf="" Passes="2" Type="String">Outbound</Value>
+          <Value Key="Description" If="[CallType]==Inbound" SkipIf="" Passes="2" Type="String">[[InboundCallText]]</Value>
+          <Value Key="Description" If="[CallType]==Missed" SkipIf="" Passes="2" Type="String">[[MissedCallText]]</Value>
+          <Value Key="Description" If="[CallType]==Outbound" SkipIf="" Passes="2" Type="String">[[OutboundCallText]]</Value>
+          <Value Key="Description" If="[CallType]==Notanswered" SkipIf="" Passes="2" Type="String">[[NotAnsweredOutboundCallText]]</Value>
+          <Value Key="WhoId" If="[EntityType]!=Account" SkipIf="" Passes="0" Type="String">[EntityId]</Value>
+          <Value Key="WhatId" If="[EntityType]==Account" SkipIf="" Passes="0" Type="String">[EntityId]</Value>
+          <Value Key="OwnerId" If="[OwnerId]!=&quot;&quot;" SkipIf="" Passes="0" Type="String">[OwnerId]</Value>
+        </PostValues>
+      </Request>
+      <Variables />
+      <Outputs AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="ReportChat" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="[ReportChatEnabled]!=True||[EntityId]==&quot;&quot;" Url="[WorkerUrl]/services/data/v55.0/query/?q=SELECT Id from User where Email = '[AgentEmail]'" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">records.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="OwnerId" LookupValue="" Path="records.Id"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="CreateChatActivity" AllowEmpty="true" />
+    </Scenario>
+    <Scenario Id="CreateChatActivity" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="[ReportChatEnabled]!=True||[EntityId]==&quot;&quot;" Url="[WorkerUrl]/services/data/v55.0/sobjects/task" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="Json" RequestType="Post" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+        <PostValues Key="" If="" SkipIf="">
+          <Value Key="Subject" If="" SkipIf="" Passes="2" Type="String">[[ChatSubject]]</Value>
+          <Value Key="Status" If="" SkipIf="" Passes="0" Type="String">Completed</Value>
+          <Value Key="Priority" If="" SkipIf="" Passes="0" Type="String">Normal</Value>
+          <Value Key="TaskSubtype" If="" SkipIf="" Passes="0" Type="String">Task</Value>
+          <Value Key="ActivityDate" If="" SkipIf="" Passes="0" Type="String">[[ChatStartTimeUTC].ToString("yyyy-MM-dd")]</Value>
+          <Value Key="CallDurationInSeconds" If="" SkipIf="" Passes="0" Type="String">[[[DurationTimespan].get_TotalSeconds()].ToString("F0")]</Value>
+          <Value Key="Description" If="" SkipIf="" Passes="0" Type="String">[[ChatMessages].Replace("\","")]</Value>
+          <Value Key="WhoId" If="[EntityType]!=Account" SkipIf="" Passes="0" Type="String">[EntityId]</Value>
+          <Value Key="WhatId" If="[EntityType]==Account" SkipIf="" Passes="0" Type="String">[EntityId]</Value>
+          <Value Key="OwnerId" If="[OwnerId]!=&quot;&quot;" SkipIf="" Passes="0" Type="String">[OwnerId]</Value>
+        </PostValues>
+      </Request>
+      <Variables />
+      <Outputs AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="CreateContactRecord" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="[CreateContactEnabled]!=True||[IIf([CreateOnCallDirection]==Inbound,[CallDirection]!=Inbound,False)]==True" Url="[WorkerUrl]/services/data/v55.0/sobjects/[IIf([CreateLeadOrContact]==Lead,lead,contact)]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="Json" RequestType="Post" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+        <PostValues Key="" If="" SkipIf="">
+          <Value Key="FirstName" If="" SkipIf="" Passes="2" Type="String">[[CreateContactFirstName]]</Value>
+          <Value Key="LastName" If="" SkipIf="" Passes="2" Type="String">[[CreateContactLastName]]</Value>
+          <Value Key="Phone" If="" SkipIf="" Passes="0" Type="String">[Number]</Value>
+          <Value Key="Company" If="[CreateLeadOrContact]==Lead" SkipIf="" Passes="2" Type="String">[[CreateContactCompany]]</Value>
+        </PostValues>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="id"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="FirstName" Passes="2" Value="[[CreateContactFirstName]]" />
+        <Output Type="LastName" Passes="2" Value="[[CreateContactLastName]]" />
+        <Output Type="CompanyName" Passes="0" Value="[IIf([CreateLeadOrContact]==Lead,&quot;[CreateContactCompany]&quot;,&quot;&quot;)]" />
+        <Output Type="PhoneBusiness" Passes="0" Value="[Number]" />
+        <Output Type="EntityType" Passes="0" Value="[IIf([CreateLeadOrContact]==Lead,Lead,Contact)]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="CreateContactRecordFromClient" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="[CreateContactEnabled]!=True" Url="[WorkerUrl]/services/data/v55.0/sobjects/[IIf([CreateLeadOrContact]==Lead,lead,contact)]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="Json" RequestType="Post" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+        <PostValues Key="" If="" SkipIf="">
+          <Value Key="FirstName" If="" SkipIf="" Passes="0" Type="String">[FirstName]</Value>
+          <Value Key="LastName" If="" SkipIf="" Passes="0" Type="String">[LastName]</Value>
+          <Value Key="Email" If="[Email]!=&quot;&quot;" SkipIf="" Passes="0" Type="String">[Email]</Value>
+          <Value Key="MobilePhone" If="[Number]!=&quot;&quot;" SkipIf="" Passes="0" Type="String">[Number]</Value>
+          <Value Key="Company" If="[CreateLeadOrContact]==Lead&amp;&amp;[Company]!=&quot;&quot;" SkipIf="" Passes="2" Type="String">[Company]</Value>
+          <Value Key="Company" If="[CreateLeadOrContact]==Lead&amp;&amp;[Company]==&quot;&quot;" SkipIf="" Passes="2" Type="String">[CreateContactCompany]</Value>
+        </PostValues>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="Id" LookupValue="" Path="id"><Filter /></Variable>
+      </Variables>
+      <Outputs AllowEmpty="false">
+        <Output Type="ContactUrl" Passes="0" Value="[WorkerUrl]/[Id]" />
+        <Output Type="FirstName" Passes="0" Value="[FirstName]" />
+        <Output Type="LastName" Passes="0" Value="[LastName]" />
+        <Output Type="CompanyName" Passes="0" Value="[IIf([Company]==&quot;&quot;,&quot;[CreateContactCompany]&quot;,&quot;[Company]&quot;)]" />
+        <Output Type="Email" Passes="0" Value="[Email]" />
+        <Output Type="PhoneMobile" Passes="0" Value="[Number]" />
+        <Output Type="EntityType" Passes="0" Value="[IIf([CreateLeadOrContact]==Lead,Lead,Contact)]" />
+        <Output Type="EntityId" Passes="0" Value="[Id]" />
+      </Outputs>
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Contacts_LookupNumber" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[Number]} IN PHONE FIELDS RETURNING Contact(Id)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="EntityID" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="LookupFromCFD_Contacts_LookupID" AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Contacts_LookupID" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/sobjects/Contact/[EntityID]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">Id</Rule>
+      </Rules>
+      <Variables />
+      <Outputs AllowEmpty="true" />
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Contacts_LookupFreeQuery" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=[Query]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables />
+      <Outputs AllowEmpty="true" />
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Leads_LookupNumber" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[Number]} IN PHONE FIELDS RETURNING Lead(Id)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="EntityID" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="LookupFromCFD_Leads_LookupID" AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Leads_LookupID" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/sobjects/Lead/[EntityID]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">Id</Rule>
+      </Rules>
+      <Variables />
+      <Outputs AllowEmpty="true" />
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Leads_LookupFreeQuery" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=[Query]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables />
+      <Outputs AllowEmpty="true" />
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Accounts_LookupNumber" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=FIND {[Number]} IN PHONE FIELDS RETURNING Account(Id)" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables>
+        <Variable Name="EntityID" LookupValue="" Path="searchRecords.Id"><Filter /></Variable>
+      </Variables>
+      <Outputs Next="LookupFromCFD_Accounts_LookupID" AllowEmpty="false" />
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Accounts_LookupID" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/sobjects/Account/[EntityID]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">Id</Rule>
+      </Rules>
+      <Variables />
+      <Outputs AllowEmpty="true" />
+    </Scenario>
+    <Scenario Id="LookupFromCFD_Accounts_LookupFreeQuery" Type="REST" EntityId="" EntityOrder="">
+      <Request SkipIf="" Url="[WorkerUrl]/services/data/v55.0/search/?q=[Query]" MessagePasses="0" Message="" RequestContentType="" RequestEncoding="UrlEncoded" RequestType="Get" ResponseType="Json">
+        <Headers>
+          <Value Key="X-Proxy-API-Key">[ApiKey]</Value>
+          <Value Key="X-Auto-Create-Policy">[AutoCreatePolicy]</Value>
+          <Value Key="X-Business-Hours-Start">[BusinessHoursStart]</Value>
+          <Value Key="X-Business-Hours-End">[BusinessHoursEnd]</Value>
+          <Value Key="X-Journal-Inbound">[JournalInbound]</Value>
+          <Value Key="X-Journal-Missed">[JournalMissed]</Value>
+          <Value Key="X-Journal-Outbound">[JournalOutbound]</Value>
+          <Value Key="X-Journal-Unanswered">[JournalUnanswered]</Value>
+          <Value Key="X-Internal-Max-Digits">[InternalMaxDigits]</Value>
+          <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
+          <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
+        </Headers>
+      </Request>
+      <Rules>
+        <Rule Type="Any" Ethalon="">searchRecords.Id</Rule>
+      </Rules>
+      <Variables />
+      <Outputs AllowEmpty="true" />
+    </Scenario>
+  </Scenarios>
+</Crm>
