@@ -86,9 +86,110 @@ In `lead` mode: first call creates a Lead, a human qualifies and converts it, an
 
 ---
 
+## Setting up a new environment
+
+Three systems to configure, in this order. Salesforce first because Cloudflare needs its credentials, and 3CX last because it needs the Worker URL.
+
+> **One CRM integration per PBX.** 3CX allows a single CRM template to be active at a time. To point a PBX at a different Salesforce org, change the Worker URL and key in the template rather than trying to run two.
+
+### Step 1 — Salesforce
+
+**1a. Create the Connected App** (Setup → App Manager → New Connected App → Create an API Integration)
+
+- Enable OAuth Settings
+- Callback URL: anything valid, e.g. `https://login.salesforce.com/services/oauth2/callback` (the client credentials flow never uses it)
+- OAuth Scopes: **Manage user data via APIs (api)**
+- Tick **Enable Client Credentials Flow**
+- Save, then **Manage Consumer Details** to copy the Consumer Key and Consumer Secret
+
+**1b. Set the run-as user** (App Manager → your app → Manage → Edit Policies → Client Credentials Flow)
+
+Pick the user the integration acts as. Every record it creates will be owned by them, so use a dedicated integration user rather than a person who might leave. That user needs Create/Read/Edit on **Contact, Lead, Account and Task**, and Read on **RecordType**.
+
+> Without a run-as user set, the token request fails with `invalid_grant`. This is the single most common setup failure.
+
+**1c. Note your My Domain URL** — e.g. `https://yourorg.my.salesforce.com`. This becomes `SALESFORCE_LOGIN_URL`.
+
+**1d. If the org uses Person Accounts**, confirm they are enabled and that the converting user's profile has a **default Account record type** (Profile → Record Type Settings → Account). Without it, Lead conversion in the UI fails with "Unable to find default record type". The Worker itself is unaffected because it always sets the record type explicitly.
+
+**1e. Optional but recommended — the External ID field.** Create a text field (e.g. `Phone_E164__c`, length 20) on Contact, Lead and Account, marked **External ID** and **Unique**. This upgrades duplicate prevention from very good to structurally impossible. See [Making dedup structural](#making-dedup-structural).
+
+**1f. Check what will block API inserts.** Duplicate rules, validation rules and required custom fields on Contact/Lead/Account reject records silently from the phone system's point of view. Worth reviewing before go-live rather than after.
+
+### Step 2 — Cloudflare
+
+```bash
+npm install
+npx wrangler login          # once per machine
+npm run deploy              # runs the test suite, then deploys
+```
+
+Then set the configuration in the dashboard (Workers & Pages → your worker → Settings → Variables and Secrets). `keep_vars = true` in [wrangler.toml](wrangler.toml) stops later deploys wiping these, so they are edited in the dashboard and never in code.
+
+Minimum to work at all:
+
+| Name | Type | Value |
+|---|---|---|
+| `SALESFORCE_LOGIN_URL` | var | Your My Domain URL from step 1c |
+| `SALESFORCE_CLIENT_ID` | secret | Consumer Key from step 1a |
+| `SALESFORCE_CLIENT_SECRET` | secret | Consumer Secret from step 1a |
+| `PROXY_API_KEY` | secret | A long random string you generate. 3CX must send the same value |
+
+Generate and set the proxy key in one go:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+npx wrangler secret put PROXY_API_KEY    # paste the value when prompted
+```
+
+> **Record the value somewhere before you paste it.** Cloudflare stores secrets write-only: `wrangler secret list` returns names and types only, and the dashboard cannot reveal them either. If the key is lost, the only route is to set a new one and update the Proxy API Key in **every** 3CX PBX pointing at this Worker, which locks out any you forget until you do.
+
+Then set `SALESFORCE_ORG_MODEL` to match the org, and anything else from the [full config reference](#cloudflare-variables). Variable changes take effect immediately with no redeploy.
+
+Note the deployed Worker URL, e.g. `https://3cx-salesforce-proxy.<subdomain>.workers.dev`.
+
+
+### Step 3 — 3CX
+
+Admin console → **Integrations → CRM** → choose Salesforce/other → **Upload** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml).
+
+Then fill in, at minimum:
+
+| Field | Value |
+|---|---|
+| Cloudflare Worker URL | From step 2, no trailing slash |
+| Proxy API Key | Must match `PROXY_API_KEY` exactly |
+
+Everything else has a working default. Review [the 3CX settings table](#3cx-settings) for filtering, auto-create policy and transcript handling.
+
+> **Password fields usually come back blank after an upload.** Re-paste the Proxy API Key and save again, otherwise every request returns 401. Re-upload the XML whenever the template version changes, and re-paste the key each time.
+
+### Step 4 — Verify
+
+Open a log stream, then make one real call from a number that is not in Salesforce:
+
+```bash
+npm run tail
+```
+
+What a healthy first call looks like:
+
+1. A lookup arrives and logs `Created Contact 003… at ring time` (or `Upserted …` if you added the External ID field)
+2. The agent's phone shows the caller as a CRM match, and the (CRM) link opens an editable record
+3. At the end of the call, a task POST journals the transcription against that record
+4. `Maintaining Contact 003…: appending call and upserting reminder`
+
+Then call again from the same number and confirm **no second record** is created and **no second reminder** is raised.
+
+If any of that misbehaves, [Troubleshooting](#troubleshooting) covers the usual causes.
+
+---
+
 ## Configuration
 
-### Cloudflare (dashboard → Workers & Pages → 3cx-salesforce-proxy → Settings → Variables and Secrets)
+### Cloudflare variables
+
+*Dashboard → Workers & Pages → your worker → Settings → Variables and Secrets*
 
 All config lives here, not in `wrangler.toml` (`keep_vars = true` stops deploys overwriting it).
 
@@ -108,7 +209,9 @@ All config lives here, not in `wrangler.toml` (`keep_vars = true` stops deploys 
 
 Variable changes apply immediately — **no redeploy needed**.
 
-### 3CX (Admin → Integrations → CRM)
+### 3CX settings
+
+*Admin console → Integrations → CRM*
 
 | Setting | Purpose |
 |---|---|
