@@ -164,6 +164,17 @@ Everything else has a working default. Review [the 3CX settings table](#3cx-sett
 
 > **Password fields usually come back blank after an upload.** Re-paste the Proxy API Key and save again, otherwise every request returns 401. Re-upload the XML whenever the template version changes, and re-paste the key each time.
 
+### Reusing this Worker for another 3CX
+
+A second PBX does **not** need its own Worker. Skip steps 1 and 2 entirely: upload the same [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) to the new PBX and enter the same Worker URL and the same Proxy API Key. That is the whole job.
+
+Two things to be clear about before you do:
+
+- **Both PBXs write into the same Salesforce org.** The org credentials and `SALESFORCE_ORG_MODEL` live on the Worker, not in the template, so every PBX pointing at a Worker shares its Salesforce destination. If the second environment needs a *different* org, deploy a second Worker (`name` in [wrangler.toml](wrangler.toml)) with its own variables, and point the new PBX at that instead.
+- **The API key is shared.** Rotating it locks out every PBX until each one is updated. Since Cloudflare cannot show you an existing key, setting up a second PBX without your saved copy means rotating once and re-pasting into both.
+
+Per-PBX behaviour still varies independently, because call filtering, auto-create policy and transcript handling are template parameters sent as request headers, not Worker variables. A head office PBX can journal everything while a satellite site logs inbound only.
+
 ### Step 4 — Verify
 
 Open a log stream, then make one real call from a number that is not in Salesforce:
