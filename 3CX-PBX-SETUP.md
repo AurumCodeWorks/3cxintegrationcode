@@ -219,6 +219,14 @@ All four route to the trunk. Leave **Outbound caller ID** blank so it falls back
 
 Blank means "any" for Prefix, Calls from extension(s), Length and Department alike.
 
+
+> **If nothing dials out, read the event log before touching anything else.** A rule that does not match produces `Warning 30052 — There was no user or outbound rule found for the number X that Ext.N dialed`, and the call never reaches the carrier at all. Two causes, in order of likelihood:
+>
+> 1. **The rule was never saved.** The edit screen looks identical whether or not you pressed Save. Check the Outbound Rules *list*, not the edit page.
+> 2. **No department is selected.** Every other field treats blank as "any", but Calls from Departments does not on all builds. The event log line names the department the extension belongs to, usually `DEFAULT`. Select it explicitly.
+>
+> Confirmed on a live build: outbound failed on every number and format until this was fixed, and no SIP traffic reached the carrier throughout.
+
 ### Why each rule exists
 
 **Rule 1** turns `00353871234567` into `+353871234567`. Without it, international either fails or gets mangled by the UK rule.
@@ -493,6 +501,7 @@ In order, because each depends on the last:
 
 | Symptom | Cause |
 |---|---|
+| Event log `30052`: no user or outbound rule found | The rule was never saved, or no department is selected on it. The call never reaches the carrier. |
 | Outbound: "no phone lines available" | Trunk simultaneous calls set to `0`, or no outbound rule matches the dialled number |
 | Inbound: caller hears busy | Trunk simultaneous calls set to `0`, or the destination group has no registered members |
 | Outbound Call Test: "No registration found" | No **extension** registered. The test needs an endpoint to originate from. |
