@@ -204,7 +204,9 @@ Combined with the allowed country list in phase 3, that is two independent contr
 
 **Voice & Chat → Emergency Numbers.** Configure `999` and `112`, routed out of the trunk, applying to **every** extension regardless of any calling restriction.
 
-Register the correct **address details for each DDI** with the carrier. That is what determines which control room receives the call and what address they are given. It is the part that gets forgotten when a site moves or a new home is added.
+Register the correct **address details for each DDI** with the carrier. That is what determines which control room receives the call and what address they are given.
+
+> **A multi-site group needs an address per site, not per account.** Carrier accounts carry a single registered address, usually head office. If a group holds DDIs across several area codes on one account, a 999 call from any of them presents the head office address unless each DDI or block has been separately registered. For a care home group that is a safety issue rather than an admin one, and it surfaces during an actual emergency. Audit it against the DDI list, match each block to the home it serves, and get the carrier to confirm in writing before go-live.
 
 > **Do not test by dialling 999.** Verify the configuration, then ask the carrier whether they provide an emergency test number.
 
@@ -259,6 +261,8 @@ Set for each:
 ### DIDs
 
 **Trunk → DID Numbers.** Add each DDI the carrier has routed to this trunk.
+
+> **First confirm the carrier has actually routed them.** Provisioning a number and pointing it at a trunk are two separate actions, and carriers routinely do the first without the second. On a Voiceflex provisioning document this shows as a **Route** column that is blank next to every DDI. The numbers are live on the account, nothing points them at your trunk, and inbound fails with no trace on your side. Get the carrier to confirm the routing before debugging anything in 3CX.
 
 > **Enter only the last six to nine digits**, e.g. `2032188` rather than `+441632960002`. 3CX matches DIDs on trailing digits, so the short form matches whether the carrier presents E.164, national, or bare significant digits. A format mismatch is the most common cause of "inbound doesn't work" on an otherwise healthy trunk.
 
@@ -398,7 +402,7 @@ In order, because each depends on the last:
 6. Outbound to a UK mobile connects, correct caller ID presented
 7. Outbound international connects, dialled **both** as `00…` and as `+…`
 8. `111` completes
-9. Emergency configuration verified, addresses registered with the carrier
+9. Emergency configuration verified, and a **correct per-site address** registered against every DDI block
 10. Inbound to **each** DDI rings the intended destination
 11. Digital receptionist plays fully before accepting a keypress
 12. Out of hours routing behaves as the client expects, tested outside hours
@@ -424,6 +428,7 @@ In order, because each depends on the last:
 | International fails, rules look correct | Country not in the allowed country codes list, or international barred on the carrier account |
 | International dialled as `+…` fails but `00…` works | Missing the `+` pass-through rule, so E.164 numbers fall into the UK rule |
 | Inbound rings the wrong place or nowhere | DID entered in a different format from the one the carrier presents. Use the last 6-9 digits. |
+| Inbound fails on every DDI, trunk healthy | Carrier has not routed the DDIs to the trunk. Check the Route column on the provisioning document. |
 | Calls connect with no audio | RTP range closed, or SIP ALG enabled on the router |
 | Calls drop at ~30 seconds | SIP ALG, or NAT keepalive not traversing |
 | CRM lookup returns a truncated number | Template `<Number MaxLength="">` was set to `[MaxLength]`. It must be empty. |
