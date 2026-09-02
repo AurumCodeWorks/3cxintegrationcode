@@ -111,8 +111,16 @@ This is the tab people skip, and it contains the setting that silently breaks ev
 
 | Setting | Value |
 |---|---|
-| **Maximum simultaneous calls** | The channel count the carrier has actually provisioned. Never leave at `0`. |
+| **Number of sim calls per trunk** | The channel count the carrier has actually provisioned. Never leave at `0`. |
+| **Allow inbound calls / Allow outbound calls** | Both ticked |
+| **Default Outbound Caller ID** | The main DDI in E.164, e.g. `+441632960002`. See the warning below. |
 | Codec priority | G.711 A-law (**PCMA**) first for the UK, G.711 mu-law (PCMU) second, G.729 last or disabled |
+| Convert inbound caller ID to E164 | On, country set correctly. Inbound caller IDs then reach the CRM already in `+44…` form. |
+| Allow carrier-side transfers (SIP REFER) | Off unless the carrier explicitly supports it |
+
+> **An empty Default Outbound Caller ID makes carriers reject your calls.** With nothing set at trunk or extension level, 3CX presents the *extension number* as the calling party. The carrier sees an INVITE from `100`, which is not a number on your account and not valid CLI, and refuses it. UK carriers are strict here because presenting unverified CLI is a regulatory problem for them. The symptom is outbound failing on a trunk that registers perfectly.
+
+> **`Number of sim calls per trunk` is 3CX's own ceiling, not the carrier's provisioning.** 3CX will happily permit ten concurrent calls to a trunk the carrier has given zero channels. Setting it correctly does not prove anything about the account.
 
 > **A trunk with zero simultaneous calls registers perfectly and passes every diagnostic, then refuses every call in both directions.** Outbound reports "no phone lines available", inbound returns busy tone, and the SIP Trunk Checker still reports registration successful, because registering does not consume a channel.
 
@@ -384,7 +392,7 @@ In order, because each depends on the last:
 
 1. Firewall checker passes (self-hosted only)
 2. Trunk registers, Trunk Analysis all green
-3. Trunk Options shows a non-zero simultaneous call limit
+3. Trunk Options: non-zero sim calls, both directions allowed, **Default Outbound Caller ID set**, PCMA above PCMU
 4. Allowed country codes include every country the client calls
 5. At least one extension registered, Web Client green
 6. Outbound to a UK mobile connects, correct caller ID presented
@@ -411,6 +419,8 @@ In order, because each depends on the last:
 | Inbound: caller hears busy | Trunk simultaneous calls set to `0`, or the destination group has no registered members |
 | Outbound Call Test: "No registration found" | No **extension** registered. The test needs an endpoint to originate from. |
 | Registration succeeds, all calls fail | Carrier has provisioned zero channels, or the account is not enabled for calls |
+| Outbound fails, trunk registers fine, channels look right | Default Outbound Caller ID empty, so 3CX presents the extension number and the carrier rejects the CLI |
+| Odd audio artefacts on a UK trunk | Codec priority has PCMU (mu-law) above PCMA (A-law) |
 | International fails, rules look correct | Country not in the allowed country codes list, or international barred on the carrier account |
 | International dialled as `+…` fails but `00…` works | Missing the `+` pass-through rule, so E.164 numbers fall into the UK rule |
 | Inbound rings the wrong place or nowhere | DID entered in a different format from the one the carrier presents. Use the last 6-9 digits. |
