@@ -10,7 +10,8 @@ Work through it in order. Each phase depends on the one before, and several diag
 
 ## Contents
 
-1. [Before you touch the console](#phase-0--before-you-touch-the-console)
+1. [Finding your way around the console](#finding-your-way-around-the-console)
+2. [Before you touch the console](#phase-0--before-you-touch-the-console)
 2. [Network and firewall](#phase-1--network-and-firewall)
 3. [Trunk](#phase-2--trunk)
 4. [Security and toll fraud](#phase-3--security-and-toll-fraud)
@@ -38,6 +39,41 @@ Every number leaving the PBX should be in full international format (`+441632960
 The alternative, passing national format and hoping the carrier copes, works until the first international call or the first number pasted out of Salesforce.
 
 **Do not use a dial-out prefix such as 9.** It is a habit from legacy PBXs, 3CX does not need it, and it puts a stray digit in front of numbers that then flows into call logs and CRM lookups.
+
+---
+
+## Finding your way around the console
+
+Read this once if you have not built a 3CX system before. Every instruction in this guide starts from the **Admin Console**.
+
+### There are two different web apps, and people confuse them
+
+| App | Address | What it is |
+|---|---|---|
+| **Admin Console** | `https://your-fqdn/admin` | Where you configure the system. Everything in this guide happens here. |
+| **Web Client** | `https://your-fqdn` | What staff use to make and take calls. You need one open, logged in as an extension, to test anything. |
+
+Log in to the Admin Console with the credentials from your 3CX licence email.
+
+### The left sidebar
+
+The console groups everything into a handful of sections. You will spend nearly all of this build in three of them.
+
+| Section | What lives there |
+|---|---|
+| **Voice & Chat** | Trunks, Inbound Rules, Outbound Rules, Emergency Numbers, Ring Groups, Queues, Digital Receptionists |
+| **Users** | Extensions and the people who own them |
+| **Settings** | Network, Security, Backup, Recordings, Voicemail, Music on Hold, Prompts |
+| **Integrations** | The CRM connection, Microsoft 365 and similar |
+| **Reports** | Call logs and statistics, useful after go-live rather than during |
+
+> **If a menu label does not match this guide, use the search box at the top of the console.** 3CX move things between V20 updates. Searching the setting name ("outbound rules", "emergency") jumps straight to it and beats hunting through menus.
+
+### Two habits that save time
+
+**Nothing applies until you press Save.** The button sits at the top of most pages. Navigating away loses your changes without warning.
+
+**Some changes prompt a service restart.** If the console offers one, take it. A setting that appears not to work is occasionally a setting that has not been applied yet.
 
 ---
 
@@ -71,6 +107,8 @@ Chasing these mid-build is what turns a two-hour job into two days:
 
 ## Phase 1 — Network and firewall
 
+**Where:** Admin Console → **Settings** → **Network**. The Firewall Checker is a button on that page.
+
 Skip this entirely if you are 3CX-hosted.
 
 Self-hosted needs these open inbound to the PBX:
@@ -93,6 +131,10 @@ If phones are on a different network from the PBX, deploy the **3CX SBC** at tha
 ---
 
 ## Phase 2 — Trunk
+
+**Where:** Admin Console → **Voice & Chat** → **Trunks** → **Add Trunk**.
+
+**What you will see:** a list of existing trunks with columns Name, Information, Department, DIDs and Route to, each with a status square that is green when registered. Opening a trunk gives you three tabs, **General**, **DID Numbers** and **Options**, plus **Check SIP Trunk** and **View Template** buttons at the top.
 
 **Voice & Chat → Trunks → Add Trunk.** Use the carrier's template if 3CX ships one rather than Generic SIP, since it presets their SIP quirks.
 
@@ -132,6 +174,8 @@ This is the tab people skip, and it contains the setting that silently breaks ev
 
 ## Phase 3 — Security and toll fraud
 
+**Where:** Admin Console → **Settings** → **Security**. The country list is on a tab of that page, usually called Allowed Country Codes.
+
 Do this **before** the outbound rules, because one of these settings will otherwise make correct rules appear broken.
 
 ### Allowed country codes
@@ -157,6 +201,10 @@ Toll fraud usually surfaces as a five-figure bill for overnight calls to premium
 ---
 
 ## Phase 4 — Outbound rules
+
+**Where:** Admin Console → **Voice & Chat** → **Outbound Rules** → **Add**.
+
+**What you will see:** a list with columns Outbound Rule Name, Prefix, Call from Ext., Length, Department and Route 1 to 5. A new system has none, which is why nothing dials out until you create one. Inside a rule, the routes are at the bottom under **Make outbound calls on**, each with its own Strip digits, Prepend and Outbound caller ID.
 
 **Voice & Chat → Outbound Rules.** 3CX evaluates these **top down and takes the first match**, so ordering is not optional. `00353…` also starts with `0`, so a `0` rule above a `00` rule swallows every international call.
 
@@ -202,6 +250,8 @@ Combined with the allowed country list in phase 3, that is two independent contr
 
 ## Phase 5 — Emergency and service numbers
 
+**Where:** Admin Console → **Voice & Chat** → **Emergency Numbers**.
+
 **Voice & Chat → Emergency Numbers.** Configure `999` and `112`, routed out of the trunk, applying to **every** extension regardless of any calling restriction.
 
 Register the correct **address details for each DDI** with the carrier. That is what determines which control room receives the call and what address they are given.
@@ -215,6 +265,10 @@ Confirm `111` and `101` complete via rule 3. In a care home these get used in ea
 ---
 
 ## Phase 6 — Extensions and users
+
+**Where:** Admin Console → **Users** → **Add User**.
+
+**What you will see:** a list of extensions each with a status dot. Green means a phone or Web Client is logged in to it. Grey means nothing is registered, and several trunk tests fail confusingly when everything is grey.
 
 Create users before inbound routing, because groups and queues need members and several tests need a registered endpoint.
 
@@ -238,6 +292,8 @@ Then provision endpoints: desk phones via the provisioning URL, or the Web Clien
 
 ## Phase 7 — Ring groups and queues
 
+**Where:** Admin Console → **Voice & Chat** → **Ring Groups**, or → **Queues**. Separate pages, because they are separate things.
+
 Decide which you need, because they behave differently under load.
 
 **Ring group** rings several extensions at once or in sequence, and the call fails or falls through when nobody answers. Right for a small reception team.
@@ -260,6 +316,8 @@ Set for each:
 
 ### DIDs
 
+**Where:** Admin Console → **Voice & Chat** → **Trunks** → open your trunk → **DID Numbers** tab.
+
 **Trunk → DID Numbers.** Add each DDI the carrier has routed to this trunk.
 
 > **First confirm the carrier has actually routed them.** Provisioning a number and pointing it at a trunk are two separate actions, and carriers routinely do the first without the second. On a Voiceflex provisioning document this shows as a **Route** column that is blank next to every DDI. The numbers are live on the account, nothing points them at your trunk, and inbound fails with no trace on your side. Get the carrier to confirm the routing before debugging anything in 3CX.
@@ -268,7 +326,7 @@ Set for each:
 
 ### Inbound rules
 
-**Voice & Chat → Inbound Rules**, one per DDI:
+**Where:** Admin Console → **Voice & Chat** → **Inbound Rules** → **Add**. One rule per DDI:
 
 | Field | Value |
 |---|---|
@@ -283,6 +341,8 @@ If a call lands somewhere unexpected, take a SIP trace and read the `To` header 
 ---
 
 ## Phase 9 — Digital receptionist and barge-in
+
+**Where:** Admin Console → **Voice & Chat** → **Digital Receptionists** → **Add**. Announcements live in the same section, and the Call Flow Designer is a separate downloadable app.
 
 Cedar Care's stated problem with their current system: **callers press 1 the instant it answers and land in the wrong department.** They want the menu heard before input is accepted.
 
@@ -304,6 +364,8 @@ Practical prompt advice:
 
 ## Phase 10 — Business hours and holidays
 
+**Where:** Office hours are set per department, so Admin Console → **Groups** (Departments on newer builds) → your group → **Office Hours**. Individual queues and inbound rules can then override it.
+
 Set the system-wide office hours, then override per queue or per inbound rule where a department differs.
 
 For a care home, most lines are **24/7**, so resist copying an office template that sends night calls to voicemail. Get the client to state, per number, what should happen at 3am. The answer is usually "ring the on-call phone", which is a forwarding rule rather than a schedule.
@@ -313,6 +375,8 @@ Add public holidays for any line that genuinely closes, typically head office an
 ---
 
 ## Phase 11 — Voicemail, music on hold, prompts
+
+**Where:** Admin Console → **Settings**. Voicemail, Music on Hold and System Prompts are each their own page in that section. Whether an individual extension has voicemail is on the user record under **Users**.
 
 | Item | Notes |
 |---|---|
@@ -324,6 +388,8 @@ Add public holidays for any line that genuinely closes, typically head office an
 ---
 
 ## Phase 12 — Call recording and retention
+
+**Where:** Admin Console → **Settings** → **Recordings** for retention and storage. Whether an individual extension records is set on the user record under **Users**.
 
 Care home call recordings are very likely **special category health data** under UK GDPR. This is a compliance decision for the client, not a technical default, and it should be recorded in writing before go-live.
 
@@ -348,6 +414,8 @@ Worth confirming with them whether "stops recording" means a genuine compliance 
 
 ## Phase 13 — Spam filter
 
+**Where:** Admin Console → **Settings**, then the Spam Filter page. If you cannot see it, search the console for spam.
+
 Check the current **Spam Action**. If it is set to **End Call**, change it.
 
 A misclassified number gets hung up on with no trace and no callback. In a care home that is a relative ringing about their mother being cut off dead, and nobody finds out it happened. Route suspected spam to voicemail or a low priority queue instead, so a false positive costs someone a callback rather than a complaint.
@@ -357,6 +425,10 @@ Review the blocked list periodically rather than treating it as set and forget.
 ---
 
 ## Phase 14 — The Salesforce integration
+
+**Where:** Admin Console → **Integrations** → **CRM**.
+
+**What you will see:** a provider dropdown and an Upload button for a template file. Once the template is uploaded, its own settings appear below it on the same page.
 
 Only once calls work in both directions.
 
@@ -379,6 +451,8 @@ The Worker is deliberately forgiving about inbound formats, so the PBX side only
 ---
 
 ## Phase 15 — Backups and monitoring
+
+**Where:** Admin Console → **Settings** → **Backup and Restore**. Event log notification addresses are under Settings as well.
 
 | Task | Notes |
 |---|---|
