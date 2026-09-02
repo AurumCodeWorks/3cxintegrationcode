@@ -310,6 +310,7 @@ The test harness mocks the Salesforce REST API and drives the Worker's `fetch` h
 | [wrangler.toml](wrangler.toml) | Deploy config only; all values live in the dashboard |
 | [3CX-PBX-SETUP.md](3CX-PBX-SETUP.md) | Configuring the phone system itself: trunk, outbound rules, emergency numbers, inbound routing |
 | [ddi-list.csv](ddi-list.csv) | The 52 Cedar Care DDIs with area, and blank columns for site and destination |
+| [ddi-plain.csv](ddi-plain.csv) / [.txt](ddi-plain.txt) | The same 52 DDIs as a bare one-per-line list, for the 3CX DID Numbers tab |
 
 > Re-upload the XML in 3CX whenever its parameters change (the version attribute is bumped each time). Password fields often blank on upload — re-paste the API key afterwards.
 
