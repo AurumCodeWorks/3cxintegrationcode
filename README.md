@@ -308,6 +308,7 @@ The test harness mocks the Salesforce REST API and drives the Worker's `fetch` h
 | [test/worker.test.mjs](test/worker.test.mjs) | Offline test suite |
 | [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) | 3CX CRM template — upload in 3CX Admin |
 | [wrangler.toml](wrangler.toml) | Deploy config only; all values live in the dashboard |
+| [3CX-PBX-SETUP.md](3CX-PBX-SETUP.md) | Configuring the phone system itself: trunk, outbound rules, emergency numbers, inbound routing |
 
 > Re-upload the XML in 3CX whenever its parameters change (the version attribute is bumped each time). Password fields often blank on upload — re-paste the API key afterwards.
 
