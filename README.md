@@ -3,7 +3,7 @@
 A Cloudflare Worker that sits between a 3CX phone system and Salesforce so that **calls from numbers that aren't in the CRM still get logged**, with their AI transcription, against a real Salesforce record — without creating duplicates.
 
 - **Worker:** `3cx-salesforce-proxy` → https://3cx-salesforce-proxy.autumn-truth-82d5.workers.dev
-- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v42)
+- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v43)
 - **Salesforce API:** v55.0, OAuth 2.0 client-credentials flow
 
 ---
@@ -235,6 +235,7 @@ Variable changes apply immediately — **no redeploy needed**.
 | Log Answered Inbound / Missed / Answered Outbound / Unanswered Outbound | Per-direction on/off |
 | Internal Extension Max Digits | Numbers this short are internal — never reach Salesforce (default 6) |
 | Excluded Number Prefixes | CSV, e.g. `0117, 0161` — sister sites, internal DDIs |
+| Excluded Extensions | CSV of extensions whose calls are never logged, e.g. `3020, 4*`. A trailing `*` matches a prefix |
 | System Extensions | CSV of receptionists, queues and ring groups, e.g. `1001, 1002, GRP*`. A trailing `*` matches a prefix. Their legs become one line and never name the record |
 | Store Call Transcripts | `Include full transcript` / `Metadata only` / `External inbound only` |
 
@@ -270,6 +271,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 - Consolidate a transferred call's legs into one activity instead of one per extension
 - Cut Salesforce API consumption from 3CX's search-as-you-type (minimum term length, plus a negative cache so once a term returns nothing, every longer term is answered locally)
 - Keep internal/sister-site calls and their transcripts **entirely** out of Salesforce
+- Exclude named extensions entirely, for confidential lines such as HR or safeguarding
 - Log a call while withholding the transcript (and withheld transcripts are never mined for names either)
 - Survive Salesforce outages without creating duplicates or losing the call log
 - Raise a visible alert when background enrichment fails, instead of failing silently
@@ -295,7 +297,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                           # 232 checks — no network, no credentials needed
+npm test                           # 241 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions

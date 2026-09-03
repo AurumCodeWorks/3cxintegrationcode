@@ -786,6 +786,14 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
         return jsonResponse(data, response.status);
       }
 
+      // Only possible when 3CX substitutes [Agent] on a lookup. When it does
+      // not, nothing is created here and the journal is dropped instead.
+      const lookupAgent = agentFromHeaders(requestHeaders);
+      if (lookupAgent && isExcludedExtension(requestHeaders, lookupAgent)) {
+        console.log(`Extension ${lookupAgent} is excluded — no record created.`);
+        return jsonResponse(data, response.status);
+      }
+
       if (/[0-9]{4,}/.test(phone)) {
         const instanceUrl = new URL(targetUrl).origin;
 
@@ -1248,12 +1256,43 @@ function systemExtensionList(headers, env) {
  * The wildcard is deliberately explicit. Treating every entry as a prefix
  * would quietly make "10" swallow extension 1050.
  */
-function isSystemExtension(list, agent) {
+function matchesExtension(list, agent) {
   if (!agent || agent === "Unknown") return false;
   return list.some(entry =>
     entry.endsWith("*")
       ? agent.startsWith(entry.slice(0, -1))
       : agent === entry);
+}
+
+function isSystemExtension(list, agent) {
+  return matchesExtension(list, agent);
+}
+
+/**
+ * Extensions whose calls must never reach Salesforce at all: HR, payroll,
+ * safeguarding, a director's desk. Distinct from the system extensions
+ * above, which are routing furniture whose legs are still worth recording.
+ *
+ * Same comma-separated, "*"-for-prefix syntax.
+ */
+function isExcludedExtension(headers, agent) {
+  const csv = (headers && headers.get ? headers.get("X-Excluded-Extensions") : "") || "";
+  return matchesExtension(csv.split(",").map(v => v.trim()).filter(Boolean), agent);
+}
+
+/**
+ * The extension a lookup is being performed for, when 3CX supplies it.
+ *
+ * Lookups are the only chance to stop a record being created at all, but
+ * 3CX does not document [Agent] as available during one. The template asks
+ * for it anyway: if the placeholder is substituted the excluded-extension
+ * rule can apply at ring time, and if it is not, an unsubstituted "[Agent]"
+ * arrives and is ignored, leaving journal-time filtering to catch it.
+ */
+function agentFromHeaders(headers) {
+  const raw = (headers && headers.get ? headers.get("X-Agent-Extension") : "") || "";
+  const agent = raw.trim();
+  return /^[A-Za-z0-9]+$/.test(agent) ? agent : "";
 }
 
 /**
@@ -1869,6 +1908,11 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   if (call.phone && isFilteredNumber(call.phone, request.headers)) {
     console.log(`Filtered number ${call.phone} — call log dropped.`);
     return jsonResponse({ success: true, errors: [], filtered: "number" }, 201);
+  }
+
+  if (isExcludedExtension(request.headers, call.agent)) {
+    console.log(`Extension ${call.agent} is excluded — call log dropped.`);
+    return jsonResponse({ success: true, errors: [], filtered: "extension" }, 201);
   }
 
   // Redact before anything is stored or mined for names: if the transcript

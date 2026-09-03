@@ -1479,6 +1479,69 @@ await runTest("routing: entries without a wildcard stay exact", async () => {
   check(appendedDescription().includes("Hello, this is the nursing team"), "treated as a real conversation");
 });
 
+// ── Excluded extensions ─────────────────────────────────────────────────
+
+// E1: a confidential extension's call never reaches Salesforce
+await runTest("excluded ext: call log dropped entirely", async () => {
+  routes = [tokenRoute];
+  const ctx = makeCtx();
+  const res = await worker.fetch(
+    taskRequest(callTaskBody("003RING00000001AAA"), { "X-Excluded-Extensions": "102" }), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const body = await res.json();
+  check(res.status === 201 && body.success === true, "3CX told it succeeded, so it does not retry");
+  check(body.filtered === "extension", "reported as an extension exclusion");
+  check(!calls.some(taskPost), "nothing written to Salesforce");
+  check(!calls.some(c => c.method === "PATCH"), "record not touched either");
+});
+
+// E2: the wildcard works here too
+await runTest("excluded ext: wildcard covers a range", async () => {
+  routes = [tokenRoute];
+  const ctx = makeCtx();
+  const res = await worker.fetch(
+    taskRequest(callTaskBody("003RING00000001AAA"), { "X-Excluded-Extensions": "1*" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check((await res.json()).filtered === "extension", "extension 102 matched by the 1* prefix");
+});
+
+// E3: everyone else is unaffected
+await runTest("excluded ext: other extensions still logged", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(
+    taskRequest(callTaskBody("003RING00000001AAA"), { "X-Excluded-Extensions": "300,301" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(!!forwardedCallTask(), "unlisted extension journals normally");
+});
+
+// E4: ring time, when 3CX supplies the extension, nothing is created
+await runTest("excluded ext: no record created at ring time", async () => {
+  routes = [tokenRoute, { match: sfSearch, reply: { searchRecords: [] } }];
+  const res = await worker.fetch(
+    lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)",
+      { "X-Excluded-Extensions": "102", "X-Agent-Extension": "102" }), env, makeCtx());
+
+  check((await res.json()).searchRecords.length === 0, "lookup stays empty");
+  check(!calls.some(contactPost), "no record created");
+});
+
+// E5: an unsubstituted placeholder must not be mistaken for an extension
+await runTest("excluded ext: unsubstituted [Agent] placeholder ignored", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003NEW0000000001AA", Phone: "+447911123456" }] } },
+    { match: contactPost, reply: { json: { id: "003NEW0000000001AA" }, status: 201 } }
+  ];
+  await worker.fetch(
+    lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)",
+      { "X-Excluded-Extensions": "102", "X-Agent-Extension": "[Agent]" }), env, makeCtx());
+
+  check(calls.some(contactPost), "record still created, placeholder not treated as an extension");
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 console.log(`\n${passed} checks passed, ${failed} failed`);
 globalThis.fetch = realFetch;
