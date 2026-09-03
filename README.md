@@ -213,6 +213,7 @@ All config lives here, not in `wrangler.toml` (`keep_vars = true` stops deploys 
 | `MIN_SEARCH_LENGTH` | var | Type-ahead searches shorter than this are answered locally (default `3`) |
 | `CALL_MERGE_WINDOW_MINUTES` | var | Transferred-leg consolidation window (default `5`, `0` disables) |
 | `EXTENSION_DEPARTMENTS` | var | JSON map of extension or prefix to site name, e.g. `{"03":"Arbour Walk"}`. Longest prefix wins |
+| `SYSTEM_EXTENSIONS` | var | CSV of auto attendant, queue and ring group extensions, e.g. `1001,1002`. Their legs are one-liners and never name the record |
 | `SALESFORCE_EXTERNAL_ID_FIELD` | var | Unique External ID field holding the E.164 number, e.g. `Phone_E164__c`. Makes dedup structural (see below) |
 | `ALERT_WEBHOOK_URL` | var | Optional. Background failures are POSTed here as JSON (Slack, Teams, Zapier) |
 | `PROXY_API_KEY` | secret | Shared key 3CX must send as `X-Proxy-API-Key` |
@@ -293,7 +294,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                           # 213 checks — no network, no credentials needed
+npm test                           # 224 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions

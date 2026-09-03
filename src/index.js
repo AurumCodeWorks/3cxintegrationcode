@@ -1219,6 +1219,26 @@ function parseCallDetails(description) {
 }
 
 /**
+ * True for extensions that are pieces of call-routing furniture rather than
+ * people: digital receptionists, queues, ring groups, voicemail boxes. Set
+ * SYSTEM_EXTENSIONS to a comma-separated list, e.g. "1001,1002,8001".
+ *
+ * 3CX journals per extension leg, so a call that greets the caller with an
+ * auto attendant before reaching a human is journaled twice: once against
+ * the attendant, once against the person. The attendant leg is real history
+ * worth keeping, but stamping it onto the record's name tells nobody
+ * anything, and it is the leg that arrives first.
+ */
+function isSystemExtension(env, agent) {
+  if (!agent || agent === "Unknown") return false;
+  return (env.SYSTEM_EXTENSIONS || "")
+    .split(",")
+    .map(v => v.trim())
+    .filter(Boolean)
+    .includes(agent);
+}
+
+/**
  * Friendly name for the site or team an extension belongs to, from the
  * EXTENSION_DEPARTMENTS variable:
  *
@@ -1588,13 +1608,6 @@ async function closeOpenReminders(env, instanceUrl, contactId) {
  */
 function renderCallBlock(env, call, description, hintLine) {
   const site = departmentFor(env, call.agent);
-  const parts = [
-    call.direction,
-    call.callTime,
-    site ? `Ext ${call.agent} (${site})` : `Ext ${call.agent}`
-  ];
-  if (call.duration) parts.push(call.duration);
-
   const sections = splitCallSections(description);
   const body = [];
   if (hintLine) body.push(hintLine);
@@ -1602,6 +1615,24 @@ function renderCallBlock(env, call, description, hintLine) {
   if (sections.summary) body.push(`Summary: ${sections.summary}`);
   if (sections.sentiment) body.push(`Sentiment: ${sections.sentiment}`);
   if (sections.recording) body.push(`Recording: ${sections.recording}`);
+
+  // A leg that ended on an auto attendant or in a queue is routing, not a
+  // conversation. Given a full block it dominates the history: a caller held
+  // for half an hour contributes a long duration and nothing said, burying
+  // the leg where somebody actually spoke. One line instead, because the
+  // wait itself is worth knowing even though nothing was discussed.
+  if (isSystemExtension(env, call.agent) && body.length === 0) {
+    const label = site ? `${site} (${call.agent})` : `extension ${call.agent}`;
+    return `\n\nRouted via ${label} at ${call.callTime}` +
+           (call.duration ? `, held ${call.duration}` : "") + ".";
+  }
+
+  const who = isSystemExtension(env, call.agent)
+    ? (site ? `${site} (${call.agent})` : `Extension ${call.agent}`)
+    : (site ? `Ext ${call.agent} (${site})` : `Ext ${call.agent}`);
+  const parts = [call.direction, call.callTime, who];
+  if (call.duration) parts.push(call.duration);
+
   if (body.length === 0) body.push("No transcription or recording available for this call.");
 
   return `\n\n===== ${parts.join(" · ")} =====\n${body.join("\n\n")}`;
@@ -1662,9 +1693,16 @@ async function maintainJournaledRecord(env, instanceUrl, whoId, taskBody) {
 
     // Ring-time records are created before the direction/extension are
     // known. Stamp the first completed call's details onto the name, e.g.
-    // "+447700900654 (Inbound 15:04, Ext 102)". Names are never taken from
-    // the call itself — see resolveContactName.
+    // "+447700900654 (Arbour Walk, Inbound 15:04, Ext 102)". Names are never
+    // taken from the call itself — see resolveContactName.
+    //
+    // Routing legs are skipped. A call greeted by an auto attendant journals
+    // that leg first, so stamping it would label the record with the menu
+    // rather than whoever dealt with the caller. Leaving the name as the
+    // bare number keeps the record eligible, and the next leg — the human
+    // one — stamps it instead.
     if (record.FirstName === DEFAULT_FIRST_NAME &&
+        !isSystemExtension(env, call.agent) &&
         (record.LastName === call.phone || record.LastName === recordPhone(record))) {
       await sfFetch(env, recordUrl, {
         method: "PATCH",

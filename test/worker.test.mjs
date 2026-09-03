@@ -1362,6 +1362,69 @@ await runTest("history: no department mapping changes nothing", async () => {
   check(appendedDescription().includes("Ext 102"), "call block still names the extension");
 });
 
+// ── Routing legs (auto attendant, queue) ────────────────────────────────
+
+const ivrDescription =
+  "17/07/2026 15:44: Answered incoming call from 447911123456 to 1001 (01:02)\n\n" +
+  "Transcription: \n\nSummary: \n\nSentiment: \n\nRecording:";
+const queueDescription =
+  "17/07/2026 15:45: Answered incoming call from 447911123456 to 1002 (28:14)\n\n" +
+  "Transcription: \n\nSummary: \n\nSentiment: \n\nRecording:";
+const sysEnv = { ...env, SYSTEM_EXTENSIONS: "1001,1002", EXTENSION_DEPARTMENTS: '{"1002":"Reception queue"}' };
+
+// S1: an auto attendant leg must not claim the record's name
+await runTest("routing: auto attendant does not stamp the record name", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ivrDescription)), sysEnv, ctx);
+  await Promise.all(ctx.tasks);
+
+  check(!contactPatches().some(p => p.body.LastName),
+    "name left as the bare number, so the human leg can stamp it");
+  const d = appendedDescription();
+  check(d.includes("Routed via extension 1001 at 15:44"), "recorded as a one-line routing note");
+  check(!d.includes("====="), "no full call block for a routing leg");
+  check(!d.includes("No transcription or recording available"), "no filler about a missing transcript");
+});
+
+// S2: a long queue hold is one line, not a block that buries the real call
+await runTest("routing: queue hold recorded compactly with its wait", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", queueDescription)), sysEnv, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check(d.includes("Reception queue (1002)"), "queue named from the department map");
+  check(d.includes("held 28:14"), "wait time kept, since it is worth knowing");
+  check(!d.includes("====="), "no full call block");
+});
+
+// S3: the human leg still behaves normally
+await runTest("routing: the human leg still stamps and logs in full", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), sysEnv, ctx);
+  await Promise.all(ctx.tasks);
+
+  const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
+  check(name.includes("Ext 102"), `real extension stamps the name (got "${name}")`);
+  check(appendedDescription().includes("====="), "full block for a real conversation");
+});
+
+// S4: a routing leg that somehow carries a transcript is not discarded
+await runTest("routing: a routing leg with a transcript keeps it", async () => {
+  const talkingIvr = ivrDescription.replace("Transcription: \n", "Transcription: Caller asked for the nursing team\n");
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", talkingIvr)), sysEnv, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check(d.includes("Caller asked for the nursing team"), "transcript preserved");
+  check(d.includes("====="), "given a full block because something was said");
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 console.log(`\n${passed} checks passed, ${failed} failed`);
 globalThis.fetch = realFetch;
