@@ -8,10 +8,10 @@
   },
   "scripts": {
     "test": "node test/worker.test.mjs",
-    "deploy": "npm test && wrangler deploy",
-    "tail": "wrangler tail",
-    "deploy:cedarcare": "npm test && wrangler deploy --env cedarcare",
-    "tail:cedarcare": "wrangler tail --env cedarcare"
+    "deploy": "npm test && npx wrangler deploy",
+    "tail": "npx wrangler tail",
+    "deploy:cedarcare": "npm test && npx wrangler deploy --env cedarcare",
+    "tail:cedarcare": "npx wrangler tail --env cedarcare"
   },
   "keywords": [],
   "author": "",

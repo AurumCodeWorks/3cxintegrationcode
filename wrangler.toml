@@ -34,3 +34,13 @@ keep_vars = true
 #
 # keep_vars above is top-level and inherited, so it protects this env too.
 [env.cedarcare]
+
+# Which org this environment talks to is part of what defines it, so these
+# two live in code rather than the dashboard. Everything else, including all
+# three secrets and any tunables, is still dashboard-managed.
+#
+# Editing these in the dashboard will be reverted by the next deploy of this
+# env. Change them here instead.
+[env.cedarcare.vars]
+SALESFORCE_LOGIN_URL = "https://cedarcarehomes--uat.sandbox.my.salesforce.com"
+SALESFORCE_ORG_MODEL = "personaccount"
