@@ -315,6 +315,7 @@ The test harness mocks the Salesforce REST API and drives the Worker's `fetch` h
 | [SALESFORCE-PERMISSIONS.md](SALESFORCE-PERMISSIONS.md) | Every object, field and record-type permission the integration user needs |
 | [ddi-list.csv](ddi-list.csv) | The 52 Cedar Care DDIs with area, and blank columns for site and destination |
 | [ddi-plain.csv](ddi-plain.csv) / [.txt](ddi-plain.txt) | The same 52 DDIs as a bare one-per-line list, for the 3CX DID Numbers tab |
+| [cedar-care-excluded-prefixes.txt](cedar-care-excluded-prefixes.txt) | Cedar Care's own numbers, ready to paste into Excluded Number Prefixes |
 
 > Re-upload the XML in 3CX whenever its parameters change (the version attribute is bumped each time). Password fields often blank on upload — re-paste the API key afterwards.
 
