@@ -18,3 +18,19 @@ compatibility_date = "2024-03-01"
 #   - SALESFORCE_CLIENT_SECRET   (secret)
 # keep_vars prevents `wrangler deploy` from wiping dashboard-managed values.
 keep_vars = true
+
+# A second Salesforce org needs its own Worker, because the credentials,
+# login URL and org model all live on the Worker rather than in the 3CX
+# template. Deploy this one with:
+#
+#   npx wrangler deploy --env cedarcare
+#
+# It publishes as a separate Worker (3cx-salesforce-proxy-cedarcare) on its
+# own URL, with its own variables and secrets set in the dashboard. The
+# default Worker above is untouched, so the existing PBX keeps working.
+#
+# Set secrets against it explicitly:
+#   npx wrangler secret put PROXY_API_KEY --env cedarcare
+#
+# keep_vars above is top-level and inherited, so it protects this env too.
+[env.cedarcare]
