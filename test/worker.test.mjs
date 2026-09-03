@@ -1278,6 +1278,90 @@ await runTest("failure alert: webhook notified when configured", async () => {
   check(JSON.parse(posted.body).text.includes("003RING00000001AAA"), "names the affected record");
 });
 
+// ── Readable call history ───────────────────────────────────────────────
+
+const maintenanceRoutes = (extra = []) => [
+  tokenRoute,
+  { match: taskPost, reply: { json: { id: "00TCALL0000000020AA" }, status: 201 } },
+  { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+  noRecentCall,
+  { match: byTask, reply: { records: [] } },
+  ...extra,
+  patch204, delete204
+];
+const appendedDescription = () => contactPatches().find(p => p.body.Description)?.body.Description || "";
+
+// R1: the call's own timestamp is used, not the moment it was journaled
+await runTest("history: uses the call's timestamp, not processing time", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  // inboundDescription opens "17/07/2026 15:00: Answered incoming call ..."
+  check(appendedDescription().includes("15:00"), "block header carries the call's own time");
+  const stamped = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
+  check(stamped.includes("15:00"), `record name carries the call's own time (got "${stamped}")`);
+});
+
+// R2: 3CX's raw line is not pasted in, so the display name cannot echo
+await runTest("history: caller's own name is not echoed back into their history", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check(!d.includes("Answered incoming call from"), "3CX's raw line not pasted into the record");
+  check(!d.includes("Unregistered Contact +447911123456 to"), "display name not echoed");
+  check(d.includes("Transcription: Hello my name is Sarah Jones"), "transcript still kept");
+});
+
+// R3: sections with no content are dropped rather than left as empty headings
+await runTest("history: empty transcript sections are omitted", async () => {
+  const bare = "17/07/2026 15:00: Answered incoming call from 447911123456 to 102 (00:09:42)\n\n" +
+               "Transcription: \n\nSummary: \n\nSentiment: \n\nRecording:";
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", bare)), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check(!/Transcription:\s*$/m.test(d), "no empty Transcription heading");
+  check(!/Summary:\s*$/m.test(d), "no empty Summary heading");
+  check(!/Sentiment:\s*$/m.test(d), "no empty Sentiment heading");
+  check(d.includes("No transcription or recording available"), "says so plainly instead");
+  check(d.includes("00:09:42"), "duration still recorded in the header");
+});
+
+// R4: the site an extension belongs to reaches the record
+await runTest("history: department mapped from the extension", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")),
+    { ...env, EXTENSION_DEPARTMENTS: '{"10":"Arbour Walk","102":"Bath House"}' }, ctx);
+  await Promise.all(ctx.tasks);
+
+  const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
+  check(name.includes("Bath House"), `longest prefix wins over shorter (got "${name}")`);
+  check(!name.includes("Arbour Walk"), "shorter prefix not used when a longer one matches");
+  check(appendedDescription().includes("Ext 102 (Bath House)"), "site shown in the call block");
+});
+
+// R5: unmapped extensions and bad JSON degrade quietly
+await runTest("history: no department mapping changes nothing", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")),
+    { ...env, EXTENSION_DEPARTMENTS: "{not json" }, ctx);
+  await Promise.all(ctx.tasks);
+
+  const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
+  check(/^\+447911123456 \(Inbound 15:00, Ext 102\)$/.test(name),
+    `invalid JSON ignored, name unchanged (got "${name}")`);
+  check(appendedDescription().includes("Ext 102"), "call block still names the extension");
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 console.log(`\n${passed} checks passed, ${failed} failed`);
 globalThis.fetch = realFetch;

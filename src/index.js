@@ -583,9 +583,15 @@ function shouldAutoCreate(headers) {
  * placeholders, each on its own labelled line.
  */
 function splitCallSections(description) {
+  // [ \t]* rather than \s* after the label, deliberately. A greedy \s* eats
+  // the newline that the terminator needs, so on an *empty* section the lazy
+  // body runs past the next heading and captures it instead: an empty
+  // "Transcription:" came back as "Summary:". Sections with content matched
+  // correctly, which is why it went unnoticed until a call arrived with no
+  // transcript at all.
   const section = label => {
     const match = description.match(
-      new RegExp(`${label}:\\s*([\\s\\S]*?)(?:\\n\\s*(?:Transcription|Summary|Sentiment|Recording):|$)`, "i"));
+      new RegExp(`${label}:[ \\t]*([\\s\\S]*?)(?:\\n\\s*(?:Transcription|Summary|Sentiment|Recording):|$)`, "i"));
     return match ? match[1].trim() : "";
   };
 
@@ -1187,15 +1193,61 @@ function parseCallDetails(description) {
     threeCxName = "";
   }
 
-  // Determine local UK call time (e.g. "15:00")
-  const callTime = new Date().toLocaleTimeString("en-GB", {
-    timeZone: "Europe/London",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  });
+  // 3CX opens the description with its own timestamp, e.g.
+  // "09/03/2026 15:04: Answered incoming call from …". Prefer that over the
+  // clock: a call is journaled when it *ends*, so using "now" labelled a ten
+  // minute call as having happened ten minutes after it started, and the
+  // header then disagreed with the line directly beneath it.
+  //
+  // Only the time is taken. The date part's field order varies with the
+  // PBX's locale and is not worth guessing at.
+  const stamped = description.match(/^\s*\S+\s+(\d{1,2}):(\d{2})/);
+  const callTime = stamped
+    ? `${stamped[1].padStart(2, "0")}:${stamped[2]}`
+    : new Date().toLocaleTimeString("en-GB", {
+        timeZone: "Europe/London",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      });
 
-  return { phone, agent, direction, threeCxName, callTime };
+  // Trailing "(mm:ss)" or "(h:mm:ss)" that 3CX appends for answered calls.
+  const durationMatch = description.match(/\((\d{1,2}:\d{2}(?::\d{2})?)\)\s*(?:\n|$)/);
+  const duration = durationMatch ? durationMatch[1] : "";
+
+  return { phone, agent, direction, threeCxName, callTime, duration };
+}
+
+/**
+ * Friendly name for the site or team an extension belongs to, from the
+ * EXTENSION_DEPARTMENTS variable:
+ *
+ *   {"0311":"Arbour Walk","03":"Arbour Walk","04":"Bath House"}
+ *
+ * Exact extension wins, then the longest matching prefix, so a whole range
+ * can be mapped in one entry with individual exceptions above it.
+ *
+ * 3CX exposes no department to CRM templates — only the extension — so this
+ * mapping is the only way to get the site onto the record.
+ */
+function departmentFor(env, agent) {
+  if (!agent || agent === "Unknown") return "";
+
+  let map;
+  try {
+    map = JSON.parse(env.EXTENSION_DEPARTMENTS || "{}");
+  } catch (e) {
+    console.error("EXTENSION_DEPARTMENTS is not valid JSON — ignoring:", e.message);
+    return "";
+  }
+
+  if (map[agent]) return String(map[agent]);
+
+  let best = "";
+  for (const prefix of Object.keys(map)) {
+    if (agent.startsWith(prefix) && prefix.length > best.length) best = prefix;
+  }
+  return best ? String(map[best]) : "";
 }
 
 /**
@@ -1208,7 +1260,7 @@ function parseCallDetails(description) {
  * correction. Any name we spot travels as a hint on the description and
  * reminder instead, so a human still gets the head start.
  */
-function resolveContactName(call, description) {
+function resolveContactName(call, description, env) {
   // Only scan the transcription section, not the summary/sentiment blocks
   const transcription = splitCallSections(description).transcription;
   const transcriptionName = extractNameFromTranscription(transcription || description);
@@ -1216,11 +1268,16 @@ function resolveContactName(call, description) {
   const hintName = call.threeCxName || transcriptionName || null;
   const hintSource = call.threeCxName ? "3CX phonebook" : (transcriptionName ? "call transcription" : null);
 
-  // Direction/time tag shown in the record name, e.g. "Inbound 15:04, Ext
-  // 102". Deliberately avoids the word "to": 3CX echoes the display name
-  // back into later call descriptions, and a name containing "to Ext 102"
-  // would corrupt the description parser.
-  const directionTag = `${call.direction} ${call.callTime}, Ext ${call.agent}`;
+  // Direction/time tag shown in the record name, e.g. "Arbour Walk, Inbound
+  // 15:04, Ext 0316". The site comes first because it is what tells a human
+  // scanning a list which home the caller reached, which the extension alone
+  // does not.
+  //
+  // Deliberately avoids the word "to": 3CX echoes the display name back into
+  // later call descriptions, and a name containing "to Ext 102" would
+  // corrupt the description parser.
+  const site = departmentFor(env || {}, call.agent);
+  const directionTag = `${site ? `${site}, ` : ""}${call.direction} ${call.callTime}, Ext ${call.agent}`;
 
   return {
     firstName: DEFAULT_FIRST_NAME,
@@ -1515,9 +1572,43 @@ async function closeOpenReminders(env, instanceUrl, contactId) {
  * Appends this call (with its transcription) to the caller's record so the
  * full history lives there as well as in its linked tasks.
  */
+/**
+ * Renders one call as a readable block for the record's Description.
+ *
+ * 3CX's raw line is deliberately not pasted in. It repeats the number, then
+ * repeats the matched record's *display name* — which itself contains the
+ * number and the direction stamp — so an auto-created caller ends up with
+ * their own name nested inside their own call history, twice. It also emits
+ * "Transcription:", "Summary:", "Sentiment:" and "Recording:" whether or not
+ * any of them have content, which on a call with no transcript is four empty
+ * headings and nothing else.
+ *
+ * Everything worth keeping is already parsed, so the block is composed from
+ * that instead and empty sections are dropped.
+ */
+function renderCallBlock(env, call, description, hintLine) {
+  const site = departmentFor(env, call.agent);
+  const parts = [
+    call.direction,
+    call.callTime,
+    site ? `Ext ${call.agent} (${site})` : `Ext ${call.agent}`
+  ];
+  if (call.duration) parts.push(call.duration);
+
+  const sections = splitCallSections(description);
+  const body = [];
+  if (hintLine) body.push(hintLine);
+  if (sections.transcription) body.push(`Transcription: ${sections.transcription}`);
+  if (sections.summary) body.push(`Summary: ${sections.summary}`);
+  if (sections.sentiment) body.push(`Sentiment: ${sections.sentiment}`);
+  if (sections.recording) body.push(`Recording: ${sections.recording}`);
+  if (body.length === 0) body.push("No transcription or recording available for this call.");
+
+  return `\n\n===== ${parts.join(" · ")} =====\n${body.join("\n\n")}`;
+}
+
 async function appendCallToRecord(env, instanceUrl, objectType, record, call, description, hintLine) {
-  const header = `\n\n===== ${call.direction} at ${call.callTime} (UK Time), Ext ${call.agent} =====\n`;
-  const appendix = `${header}${hintLine ? `${hintLine}\n` : ""}${description}`;
+  const appendix = renderCallBlock(env, call, description, hintLine);
   await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}/${record.Id}`, {
     method: "PATCH",
     body: JSON.stringify({
@@ -1566,7 +1657,7 @@ async function maintainJournaledRecord(env, instanceUrl, whoId, taskBody) {
       call.phone = recordPhone(record);
     }
 
-    const nameInfo = resolveContactName(call, description);
+    const nameInfo = resolveContactName(call, description, env);
     const recordUrl = `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}/${record.Id}`;
 
     // Ring-time records are created before the direction/extension are
