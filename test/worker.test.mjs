@@ -1542,6 +1542,62 @@ await runTest("excluded ext: unsubstituted [Agent] placeholder ignored", async (
   check(calls.some(contactPost), "record still created, placeholder not treated as an extension");
 });
 
+// ── Confidential extensions ─────────────────────────────────────────────
+
+const confHeaders = { "X-Confidential-Extensions": "102" };
+
+// C1: the call is logged, its content is not
+await runTest("confidential: call logged, content withheld", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"), confHeaders), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  check(res.status === 201, "call still journaled");
+  const logged = forwardedCallTask();
+  check(!!logged, "call log written to Salesforce");
+  check(logged.Description.includes("Answered incoming call"), "who, when and how long is kept");
+  check(logged.Description.includes("Content withheld"), "says plainly why there is no transcript");
+});
+
+// C2: nothing derived from what was said survives, summary included
+await runTest("confidential: transcript, summary, sentiment and recording all removed", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"), confHeaders), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = forwardedCallTask().Description;
+  check(!d.includes("Sarah Jones"), "transcript gone");
+  check(!d.includes("Caller asked about an order"), "AI summary gone, being the same content in fewer words");
+  check(!d.includes("Neutral"), "sentiment gone");
+  check(!d.includes("rec.wav"), "recording link gone");
+});
+
+// C3: and none of it reaches the record either
+await runTest("confidential: content never reaches the contact record", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"), confHeaders), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check(d.length > 0, "the call is still appended to the record");
+  check(!d.includes("Sarah Jones"), "no transcript on the record");
+  check(!d.includes("rec.wav"), "no recording link on the record");
+  check(!alertTaskPost()?.Description?.includes("Sarah Jones"), "and no name hint mined from it");
+});
+
+// C4: other extensions keep their transcripts
+await runTest("confidential: unlisted extensions unaffected", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"),
+    { "X-Confidential-Extensions": "300,4*" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(forwardedCallTask().Description.includes("Sarah Jones"), "extension 102 keeps its transcript");
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 console.log(`\n${passed} checks passed, ${failed} failed`);
 globalThis.fetch = realFetch;

@@ -685,6 +685,28 @@ function applyTranscriptPolicy(description, direction, headers) {
 }
 
 /**
+ * Extensions where the call is worth logging but its content is not safe to
+ * store: nurse to nurse, safeguarding, anything clinical.
+ *
+ * Keeps who called whom, when, and for how long, and discards everything
+ * derived from what was said. That includes the **summary and sentiment**,
+ * not just the transcript: an AI summary of a conversation about a resident
+ * is the same confidential information in fewer words, which is why the
+ * ordinary transcript policy is not enough here.
+ */
+function isConfidentialExtension(headers, agent) {
+  const csv = (headers && headers.get ? headers.get("X-Confidential-Extensions") : "") || "";
+  return matchesExtension(csv.split(",").map(v => v.trim()).filter(Boolean), agent);
+}
+
+function redactCallContent(description) {
+  const { header } = splitCallSections(description);
+  return `${header}\n\n[Content withheld: this extension is marked confidential. ` +
+         `The call itself is logged, but the transcript, summary and recording ` +
+         `link are not stored in Salesforce.]`;
+}
+
+/**
  * Smart Natural Language processing regex parser to extract names from transcription.
  * Searches for caller introductions like "my name is John", "this is Sarah", "I'm David".
  */
@@ -1919,6 +1941,13 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   // is withheld by policy, it must not reach the contact record either.
   if (taskBody.Description) {
     taskBody.Description = applyTranscriptPolicy(taskBody.Description, call.direction, request.headers);
+
+    // Per-extension confidentiality is stricter than the global policy and
+    // is applied after it, so whichever removes more content wins.
+    if (isConfidentialExtension(request.headers, call.agent)) {
+      console.log(`Extension ${call.agent} is confidential — logging the call without its content.`);
+      taskBody.Description = redactCallContent(taskBody.Description);
+    }
   }
 
   // Records are created at ring time now, so a task should always arrive

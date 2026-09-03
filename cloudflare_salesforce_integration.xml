@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="US" Name="CloudflareSalesforceProxy" Version="43" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
+<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="US" Name="CloudflareSalesforceProxy" Version="44" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
   <!-- MaxLength intentionally empty: pass the FULL caller number to the proxy.
        [MaxLength] would truncate to the PBX "match length" setting (e.g. last 7
        digits), which breaks Salesforce lookups and E.164 contact creation. -->
@@ -23,6 +23,7 @@
     <Parameter Name="InternalMaxDigits" Type="String" Parent="General Configuration" Editor="String" Title="Internal Extension Max Digits:" Validation="" Default="6" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="ExcludedPrefixes" Type="String" Parent="General Configuration" Editor="String" Title="Excluded Number Prefixes (comma separated):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="ExcludedExtensions" Type="String" Parent="General Configuration" Editor="String" Title="Excluded Extensions - never logged to the CRM (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ConfidentialExtensions" Type="String" Parent="General Configuration" Editor="String" Title="Confidential Extensions - log the call, never its content (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="SystemExtensions" Type="String" Parent="General Configuration" Editor="String" Title="System Extensions - receptionists, queues, ring groups (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="TranscriptPolicy" Type="List" Parent="General Configuration" Editor="String" Title="Store Call Transcripts:" Validation="" Default="Include full transcript" ListValues="Include full transcript,Metadata only,External inbound only" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
 
@@ -55,6 +56,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -95,6 +97,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -143,6 +146,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -181,6 +185,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -221,6 +226,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -269,6 +275,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -308,6 +315,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -351,6 +359,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -391,6 +400,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -419,6 +429,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -474,6 +485,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -522,6 +534,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -561,6 +574,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -601,6 +615,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -628,6 +643,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -669,6 +685,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -696,6 +713,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -730,6 +748,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -771,6 +790,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -815,6 +835,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -842,6 +863,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -867,6 +889,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -892,6 +915,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -919,6 +943,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -944,6 +969,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -969,6 +995,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -996,6 +1023,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
@@ -1021,6 +1049,7 @@
           <Value Key="X-Excluded-Prefixes">[ExcludedPrefixes]</Value>
           <Value Key="X-System-Extensions">[SystemExtensions]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
+          <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
           <Value Key="X-Transcript-Policy">[TranscriptPolicy]</Value>
         </Headers>
