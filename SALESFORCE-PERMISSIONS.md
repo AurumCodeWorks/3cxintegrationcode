@@ -146,4 +146,8 @@ Six fields were hidden from `integration.user@example.com` on a freshly configur
 
 Everything on Lead and Task was accessible, as were the remaining Contact and Account fields.
 
+A seventh, `Contact.Description`, was found later. It is where the call transcript is appended, so the integration would have logged calls without ever recording what was said.
+
+After granting all seven, the full chain was verified by exercising it rather than reading checkboxes: create a Person Account, PATCH it, read back `PersonContactId`, delete it. All four succeeded, confirming Create, Edit, Delete, the person record type assignment, and that `PersonContactId` resolves so `Task.WhoId` can link a call log.
+
 The first symptom was 3CX reporting `No such column 'AssistantPhone' on entity 'Contact'` during a contact search. The more serious problem was invisible: in `personaccount` mode the Worker's own lookup selects `PersonHomePhone`, so it would have failed on every call while appearing to work.
