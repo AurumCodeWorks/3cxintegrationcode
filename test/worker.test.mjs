@@ -1370,13 +1370,15 @@ const ivrDescription =
 const queueDescription =
   "17/07/2026 15:45: Answered incoming call from 447911123456 to 1002 (28:14)\n\n" +
   "Transcription: \n\nSummary: \n\nSentiment: \n\nRecording:";
-const sysEnv = { ...env, SYSTEM_EXTENSIONS: "1001,1002", EXTENSION_DEPARTMENTS: '{"1002":"Reception queue"}' };
+const sysEnv = { ...env, EXTENSION_DEPARTMENTS: '{"1002":"Reception queue"}' };
+const sysHeaders = { "X-System-Extensions": "1001,1002" };
+const legacySysEnv = { ...env, SYSTEM_EXTENSIONS: "1001,1002" };
 
 // S1: an auto attendant leg must not claim the record's name
 await runTest("routing: auto attendant does not stamp the record name", async () => {
   routes = maintenanceRoutes();
   const ctx = makeCtx();
-  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ivrDescription)), sysEnv, ctx);
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ivrDescription), sysHeaders), sysEnv, ctx);
   await Promise.all(ctx.tasks);
 
   check(!contactPatches().some(p => p.body.LastName),
@@ -1391,7 +1393,7 @@ await runTest("routing: auto attendant does not stamp the record name", async ()
 await runTest("routing: queue hold recorded compactly with its wait", async () => {
   routes = maintenanceRoutes();
   const ctx = makeCtx();
-  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", queueDescription)), sysEnv, ctx);
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", queueDescription), sysHeaders), sysEnv, ctx);
   await Promise.all(ctx.tasks);
 
   const d = appendedDescription();
@@ -1404,7 +1406,7 @@ await runTest("routing: queue hold recorded compactly with its wait", async () =
 await runTest("routing: the human leg still stamps and logs in full", async () => {
   routes = maintenanceRoutes();
   const ctx = makeCtx();
-  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), sysEnv, ctx);
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"), sysHeaders), sysEnv, ctx);
   await Promise.all(ctx.tasks);
 
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
@@ -1417,12 +1419,35 @@ await runTest("routing: a routing leg with a transcript keeps it", async () => {
   const talkingIvr = ivrDescription.replace("Transcription: \n", "Transcription: Caller asked for the nursing team\n");
   routes = maintenanceRoutes();
   const ctx = makeCtx();
-  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", talkingIvr)), sysEnv, ctx);
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", talkingIvr), sysHeaders), sysEnv, ctx);
   await Promise.all(ctx.tasks);
 
   const d = appendedDescription();
   check(d.includes("Caller asked for the nursing team"), "transcript preserved");
   check(d.includes("====="), "given a full block because something was said");
+});
+
+// S5: a PBX still on an older template falls back to the variable
+await runTest("routing: SYSTEM_EXTENSIONS variable still honoured without the header", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ivrDescription)), legacySysEnv, ctx);
+  await Promise.all(ctx.tasks);
+
+  check(appendedDescription().includes("Routed via extension 1001"), "recognised from the variable alone");
+  check(!contactPatches().some(p => p.body.LastName), "still does not stamp the record name");
+});
+
+// S6: with neither configured, nothing is treated as routing
+await runTest("routing: unconfigured means every extension is treated as a person", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ivrDescription)), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  check(appendedDescription().includes("====="), "auto attendant leg gets a full block");
+  const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
+  check(name.includes("Ext 1001"), `and stamps the menu extension onto the name (got "${name}")`);
 });
 
 // ═════════════════════════════════════════════════════════════════════════

@@ -1219,23 +1219,30 @@ function parseCallDetails(description) {
 }
 
 /**
- * True for extensions that are pieces of call-routing furniture rather than
- * people: digital receptionists, queues, ring groups, voicemail boxes. Set
- * SYSTEM_EXTENSIONS to a comma-separated list, e.g. "1001,1002,8001".
+ * Extensions that are call-routing furniture rather than people: digital
+ * receptionists, queues, ring groups, voicemail boxes.
  *
- * 3CX journals per extension leg, so a call that greets the caller with an
- * auto attendant before reaching a human is journaled twice: once against
- * the attendant, once against the person. The attendant leg is real history
- * worth keeping, but stamping it onto the record's name tells nobody
- * anything, and it is the leg that arrives first.
+ * Configured in the 3CX template next to the number exclusions, since it is
+ * a fact about the phone system rather than about Salesforce, and whoever
+ * builds the call flows already knows these numbers. The SYSTEM_EXTENSIONS
+ * variable stays supported as a fallback for a PBX still on an older
+ * template.
+ *
+ * 3CX journals per extension leg, so a call greeted by an auto attendant is
+ * journaled against the attendant first and only later against whoever dealt
+ * with it. That first leg is worth recording but must not name the record.
  */
-function isSystemExtension(env, agent) {
-  if (!agent || agent === "Unknown") return false;
-  return (env.SYSTEM_EXTENSIONS || "")
+function systemExtensionList(headers, env) {
+  const fromHeader = headers && headers.get ? (headers.get("X-System-Extensions") || "") : "";
+  return (fromHeader || (env && env.SYSTEM_EXTENSIONS) || "")
     .split(",")
     .map(v => v.trim())
-    .filter(Boolean)
-    .includes(agent);
+    .filter(Boolean);
+}
+
+function isSystemExtension(list, agent) {
+  if (!agent || agent === "Unknown") return false;
+  return list.includes(agent);
 }
 
 /**
@@ -1606,7 +1613,7 @@ async function closeOpenReminders(env, instanceUrl, contactId) {
  * Everything worth keeping is already parsed, so the block is composed from
  * that instead and empty sections are dropped.
  */
-function renderCallBlock(env, call, description, hintLine) {
+function renderCallBlock(env, sysExts, call, description, hintLine) {
   const site = departmentFor(env, call.agent);
   const sections = splitCallSections(description);
   const body = [];
@@ -1621,13 +1628,13 @@ function renderCallBlock(env, call, description, hintLine) {
   // for half an hour contributes a long duration and nothing said, burying
   // the leg where somebody actually spoke. One line instead, because the
   // wait itself is worth knowing even though nothing was discussed.
-  if (isSystemExtension(env, call.agent) && body.length === 0) {
+  if (isSystemExtension(sysExts, call.agent) && body.length === 0) {
     const label = site ? `${site} (${call.agent})` : `extension ${call.agent}`;
     return `\n\nRouted via ${label} at ${call.callTime}` +
            (call.duration ? `, held ${call.duration}` : "") + ".";
   }
 
-  const who = isSystemExtension(env, call.agent)
+  const who = isSystemExtension(sysExts, call.agent)
     ? (site ? `${site} (${call.agent})` : `Extension ${call.agent}`)
     : (site ? `Ext ${call.agent} (${site})` : `Ext ${call.agent}`);
   const parts = [call.direction, call.callTime, who];
@@ -1638,8 +1645,8 @@ function renderCallBlock(env, call, description, hintLine) {
   return `\n\n===== ${parts.join(" · ")} =====\n${body.join("\n\n")}`;
 }
 
-async function appendCallToRecord(env, instanceUrl, objectType, record, call, description, hintLine) {
-  const appendix = renderCallBlock(env, call, description, hintLine);
+async function appendCallToRecord(env, sysExts, instanceUrl, objectType, record, call, description, hintLine) {
+  const appendix = renderCallBlock(env, sysExts, call, description, hintLine);
   await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}/${record.Id}`, {
     method: "PATCH",
     body: JSON.stringify({
@@ -1667,7 +1674,7 @@ function recordPhone(record) {
  * backing contact); `record` is the object we actually update, which for a
  * Person Account is the Account itself.
  */
-async function maintainJournaledRecord(env, instanceUrl, whoId, taskBody) {
+async function maintainJournaledRecord(env, sysExts, instanceUrl, whoId, taskBody) {
   try {
     const resolved = await resolveJournaledRecord(env, instanceUrl, whoId);
     if (!resolved) return;
@@ -1702,7 +1709,7 @@ async function maintainJournaledRecord(env, instanceUrl, whoId, taskBody) {
     // bare number keeps the record eligible, and the next leg — the human
     // one — stamps it instead.
     if (record.FirstName === DEFAULT_FIRST_NAME &&
-        !isSystemExtension(env, call.agent) &&
+        !isSystemExtension(sysExts, call.agent) &&
         (record.LastName === call.phone || record.LastName === recordPhone(record))) {
       await sfFetch(env, recordUrl, {
         method: "PATCH",
@@ -1710,7 +1717,7 @@ async function maintainJournaledRecord(env, instanceUrl, whoId, taskBody) {
       });
     }
 
-    await appendCallToRecord(env, instanceUrl, objectType, record, call, description, nameInfo.hintLine);
+    await appendCallToRecord(env, sysExts, instanceUrl, objectType, record, call, description, nameInfo.hintLine);
     await upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, taskBody.OwnerId);
   } catch (error) {
     console.error("Record/alert maintenance failed:", error);
@@ -1872,6 +1879,10 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
     const whoId = taskBody.WhoId || "";
     const isPersonRecord = new RegExp(`^(${PREFIX_CONTACT}|${PREFIX_LEAD})[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$`).test(whoId);
 
+    // Read once here, because the background maintenance runs after the
+    // response and no longer has the request to read headers from.
+    const sysExts = systemExtensionList(request.headers, env);
+
     // A transferred call journals once per extension leg. Fold the later
     // legs into the first call log so one conversation stays one activity.
     // Consolidation is a convenience; losing the call log is not acceptable,
@@ -1880,7 +1891,7 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
       try {
         const mergedId = await mergeIntoRecentCallTask(env, instanceUrl, whoId, taskBody, call);
         if (mergedId) {
-          ctx.waitUntil(maintainJournaledRecord(env, instanceUrl, whoId, taskBody));
+          ctx.waitUntil(maintainJournaledRecord(env, sysExts, instanceUrl, whoId, taskBody));
           return jsonResponse({ id: mergedId, success: true, errors: [], merged: true }, 201);
         }
       } catch (error) {
@@ -1892,7 +1903,7 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
     // maintenance when the task targets a Contact or Lead.
     const response = await forwardTask();
     if (response.ok && isPersonRecord) {
-      ctx.waitUntil(maintainJournaledRecord(env, instanceUrl, whoId, taskBody));
+      ctx.waitUntil(maintainJournaledRecord(env, sysExts, instanceUrl, whoId, taskBody));
     }
     return response;
   }
