@@ -1450,6 +1450,35 @@ await runTest("routing: unconfigured means every extension is treated as a perso
   check(name.includes("Ext 1001"), `and stamps the menu extension onto the name (got "${name}")`);
 });
 
+// S7: a wildcard covers a whole family of call-handling objects
+await runTest("routing: wildcard matches a family of system extensions", async () => {
+  const groupCall = "17/07/2026 15:44: Answered incoming call from 447911123456 to GRP0007 (00:31)\n\n" +
+                    "Transcription: \n\nSummary: \n\nSentiment: \n\nRecording:";
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", groupCall),
+    { "X-System-Extensions": "1001, GRP*" }), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  check(appendedDescription().includes("Routed via extension GRP0007"), "ring group matched by prefix");
+  check(!contactPatches().some(p => p.body.LastName), "does not stamp the record name");
+});
+
+// S8: the wildcard must be explicit, so a bare entry cannot over-match
+await runTest("routing: entries without a wildcard stay exact", async () => {
+  const ext1050 = "17/07/2026 15:44: Answered incoming call from 447911123456 to 1050 (04:12)\n\n" +
+                  "Transcription: Hello, this is the nursing team\n\nSummary: \n\nSentiment: \n\nRecording:";
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ext1050),
+    { "X-System-Extensions": "10, 1001" }), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
+  check(name.includes("Ext 1050"), `"10" does not swallow 1050 (got "${name}")`);
+  check(appendedDescription().includes("Hello, this is the nursing team"), "treated as a real conversation");
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 console.log(`\n${passed} checks passed, ${failed} failed`);
 globalThis.fetch = realFetch;

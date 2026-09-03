@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="US" Name="CloudflareSalesforceProxy" Version="41" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
+<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="US" Name="CloudflareSalesforceProxy" Version="42" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
   <!-- MaxLength intentionally empty: pass the FULL caller number to the proxy.
        [MaxLength] would truncate to the PBX "match length" setting (e.g. last 7
        digits), which breaks Salesforce lookups and E.164 contact creation. -->
@@ -22,7 +22,7 @@
     <Parameter Name="JournalUnanswered" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Unanswered Outbound Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="InternalMaxDigits" Type="String" Parent="General Configuration" Editor="String" Title="Internal Extension Max Digits:" Validation="" Default="6" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="ExcludedPrefixes" Type="String" Parent="General Configuration" Editor="String" Title="Excluded Number Prefixes (comma separated):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="SystemExtensions" Type="String" Parent="General Configuration" Editor="String" Title="Auto Attendant / Queue Extensions (comma separated):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="SystemExtensions" Type="String" Parent="General Configuration" Editor="String" Title="System Extensions - receptionists, queues, ring groups (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="TranscriptPolicy" Type="List" Parent="General Configuration" Editor="String" Title="Store Call Transcripts:" Validation="" Default="Include full transcript" ListValues="Include full transcript,Metadata only,External inbound only" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
 
     <Parameter Name="ReportCallEnabled" Type="Boolean" Parent="" Editor="String" Title="Enable Call Journaling" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />

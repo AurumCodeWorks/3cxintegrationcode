@@ -1240,9 +1240,20 @@ function systemExtensionList(headers, env) {
     .filter(Boolean);
 }
 
+/**
+ * Entries are exact by default. A trailing "*" makes one a prefix, so
+ * "GRP*" covers every ring group in one entry rather than listing twenty of
+ * them and revisiting the list each time a home is added.
+ *
+ * The wildcard is deliberately explicit. Treating every entry as a prefix
+ * would quietly make "10" swallow extension 1050.
+ */
 function isSystemExtension(list, agent) {
   if (!agent || agent === "Unknown") return false;
-  return list.includes(agent);
+  return list.some(entry =>
+    entry.endsWith("*")
+      ? agent.startsWith(entry.slice(0, -1))
+      : agent === entry);
 }
 
 /**
