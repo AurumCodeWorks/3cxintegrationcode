@@ -1162,6 +1162,102 @@ await runTest("empty-AccountId query short-circuited locally", async () => {
   check(!calls.some(c => c.url.startsWith(SF) && c.url.includes("/query/")), "Salesforce not queried");
 });
 
+// ── Person Accounts with the External ID: the live configuration ────────
+
+const paKeyEnv  = { ...paEnv, SALESFORCE_EXTERNAL_ID_FIELD: "Phone_E164__c" };
+const paKeyGet  = r => r.method === "GET" && r.url.includes("/sobjects/Account/Phone_E164__c/");
+const paKeyQ    = r => r.method === "GET" && r.url.includes("WHERE+Phone_E164__c");
+const paAnyWrite = r => ["POST", "PATCH", "DELETE"].includes(r.method) && r.url.includes("/sobjects/Account");
+
+// PX1: the configuration going live — a curated Person Account the phone
+// finder cannot match must be returned untouched, with PersonContactId intact
+await runTest("personaccount + key: curated account matched and left alone", async () => {
+  const curated = {
+    Id: "001CURATED0001AAA",
+    FirstName: "Margaret",
+    LastName: "Hale",
+    Phone: "07911 123 456",
+    PersonContactId: "003BACKING0001AAA",
+    Description: "months of call history"
+  };
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: recordTypeQuery, reply: { records: [{ Id: "012RT00000000001AAA" }] } },
+    { match: paKeyQ, reply: { records: [curated] } },
+    { match: byAccountPhone, reply: { records: [curated] } },
+    { match: paKeyGet, reply: { json: curated, status: 200 } },
+    { match: paAnyWrite, reply: { json: { id: "SHOULD_NOT_HAPPEN" }, status: 201 } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"), paKeyEnv, makeCtx());
+
+  check(!calls.some(paAnyWrite), "nothing written to the Person Account");
+  const rec = (await res.json()).searchRecords[0];
+  check(rec.Id === "003BACKING0001AAA", "PersonContactId returned to 3CX, not the Account id");
+  check(rec.attributes.type === "Contact", "typed as Contact so 3CX populates WhoId");
+});
+
+// PX2: the finder query in personaccount mode carries the key and still
+// excludes business accounts
+await runTest("personaccount + key: identity query keeps IsPersonAccount and adds the key", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: recordTypeQuery, reply: { records: [{ Id: "012RT00000000001AAA" }] } },
+    { match: byAccountPhone, reply: { records: [{ Id: "001PA0000000009AAA", PersonContactId: "003B00000000009AAA" }] } }
+  ];
+  await worker.fetch(lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"),
+    paKeyEnv, makeCtx());
+
+  const q = decodeURIComponent(calls.find(byAccountPhone).url.replace(/\+/g, "%20"));
+  check(q.includes("IsPersonAccount = true AND ("), "business accounts still excluded");
+  check(q.includes("Phone_E164__c = '+447911123456'"), "external id searched alongside the phone fields");
+});
+
+// PX3: an unknown caller inserts, and the insert carries the key so the
+// unique constraint actually covers the new row
+await runTest("personaccount + key: new caller inserted with the key set", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: recordTypeQuery, reply: { records: [{ Id: "012RT00000000001AAA" }] } },
+    { match: paKeyGet, reply: { json: [{ errorCode: "NOT_FOUND" }], status: 404 } },
+    { match: paKeyQ, reply: { records: [{ Id: "001NEW0000000001AAA", PersonContactId: "003NEW0000000001AAA" }] } },
+    { match: byAccountPhone, reply: { records: [] } },
+    { match: accountPost, reply: { json: { id: "001NEW0000000001AAA" }, status: 201 } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"), paKeyEnv, makeCtx());
+
+  const created = JSON.parse(calls.find(accountPost).body);
+  check(created.Phone_E164__c === "+447911123456", "key written on insert");
+  check(created.RecordTypeId === "012RT00000000001AAA", "person record type still applied");
+  check((await res.json()).searchRecords[0].Id === "003NEW0000000001AAA", "backing contact id returned");
+});
+
+// PX4: when the keyed insert fails for any reason, the fallback insert must
+// still carry the key — Salesforce excludes nulls from unique constraints, so
+// a fallback row without it sits outside the guarantee
+await runTest("personaccount + key: fallback insert still carries the key", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: recordTypeQuery, reply: { records: [{ Id: "012RT00000000001AAA" }] } },
+    { match: paKeyGet, reply: { json: [{ errorCode: "SERVER_ERROR" }], status: 503 } },
+    { match: paKeyQ, reply: { records: [] } },
+    { match: byAccountPhone, reply: (r, hits) => hits === 1 ? { records: [] }
+        : { records: [{ Id: "001FBK0000000001AA", PersonContactId: "003FBK0000000001AA" }] } },
+    { match: accountPost, reply: { json: { id: "001FBK0000000001AA" }, status: 201 } }
+  ];
+  await worker.fetch(lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"),
+    paKeyEnv, makeCtx());
+
+  const created = JSON.parse(calls.find(accountPost).body);
+  check(created.Phone_E164__c === "+447911123456",
+    "fallback row is inside the unique constraint, not outside it");
+});
+
 // ── Structural dedup via a unique External ID field ─────────────────────
 
 const upsertEnv = { ...env, SALESFORCE_EXTERNAL_ID_FIELD: "Phone_E164__c" };
@@ -1175,7 +1271,7 @@ await runTest("external id: absent key inserts, carrying the key", async () => {
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
     { match: keyGet, reply: { json: [{ errorCode: "NOT_FOUND" }], status: 404 } },
-    { match: keyQuery, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003UPS000000001AAA", FirstName: "Unregistered Contact", LastName: "+447911123456", Phone: "+447911123456" }] } },
+    { match: keyQuery, reply: { records: [{ Id: "003UPS000000001AAA", FirstName: "Unregistered Contact", LastName: "+447911123456", Phone: "+447911123456" }] } },
     { match: byPhone, reply: { records: [] } },
     { match: contactPost, reply: { json: { id: "003UPS000000001AAA" }, status: 201 } }
   ];

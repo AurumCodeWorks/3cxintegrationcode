@@ -979,7 +979,7 @@ async function createPersonAccountDeduped(env, instanceUrl, phone) {
     Description: ringTimeDescription(),
     ...extraFields(env, "Account")
   }, `SELECT ${PERSON_ACCOUNT_FIELDS} FROM Account WHERE IsPersonAccount = true AND (` +
-     `${phoneMatchClause(["Phone", "PersonMobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
+     `${identityMatchClause(env, ["Phone", "PersonMobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
 }
 
 async function createLeadDeduped(env, instanceUrl, phone) {
@@ -993,7 +993,7 @@ async function createLeadDeduped(env, instanceUrl, phone) {
     Description: ringTimeDescription(),
     ...extraFields(env, "Lead")
   }, `SELECT ${LEAD_FIELDS} FROM Lead WHERE IsConverted = false AND (` +
-     `${phoneMatchClause(["Phone", "MobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
+     `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
 }
 
 function ringTimeDescription() {
@@ -1050,6 +1050,14 @@ async function upsertByExternalId(env, instanceUrl, objectType, field, phone, bo
   const readByKey = () => sfQuery(env, instanceUrl,
     `SELECT ${selected} FROM ${objectType} WHERE ${field} = '${phone}' LIMIT 1`);
 
+  // A record must never be handed back as a bare id. In personaccount mode the
+  // caller needs PersonContactId, which no create response returns, and without
+  // it the lookup yields nothing and the call goes unlogged. If the key read
+  // comes up empty, read the row we just wrote by its own id instead.
+  const readById = id => id
+    ? sfQuery(env, instanceUrl, `SELECT ${selected} FROM ${objectType} WHERE Id = '${id}' LIMIT 1`)
+    : Promise.resolve(null);
+
   // Look before writing.
   //
   // PATCHing the external-id endpoint is Salesforce's upsert, and on a match
@@ -1092,11 +1100,17 @@ async function upsertByExternalId(env, instanceUrl, objectType, field, phone, bo
 
   if (created.ok) {
     const id = (await created.json().catch(() => ({}))).id || null;
-    const records = await readByKey();
-    const mine = records && records[0];
-    console.log(`Created ${objectType} ${(mine && mine.Id) || id} with ${field} ${phone}`);
-    return mine ? { record: mine, isNew: true }
-                : (id ? { record: { Id: id, ...body }, isNew: true } : null);
+    const byKey = await readByKey();
+    const mine = (byKey && byKey[0]) || ((await readById(id)) || [])[0];
+    if (mine) {
+      console.log(`Created ${objectType} ${mine.Id} with ${field} ${phone}`);
+      return { record: mine, isNew: true };
+    }
+    // Written, but unreadable. Returning a bare id would strand the caller
+    // without PersonContactId, so report failure and let the caller fall
+    // back rather than hand back a half-formed record.
+    console.error(`Created ${objectType} ${id} but could not read it back.`);
+    return null;
   }
 
   // A simultaneous call inserted first and the unique constraint refused
@@ -1132,9 +1146,13 @@ async function createRecordDeduped(env, instanceUrl, objectType, body, convergeS
     console.error(`Falling back to create-then-converge for ${objectType}.`);
   }
 
+  // Carry the External ID here as well. Salesforce excludes nulls from a
+  // unique constraint, so a fallback row written without it sits outside the
+  // guarantee entirely — and these are rows created precisely when something
+  // has already gone wrong.
   const response = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}`, {
     method: "POST",
-    body: JSON.stringify(body)
+    body: JSON.stringify(field && phone ? { ...body, [field]: phone } : body)
   });
 
   if (!response.ok) {
@@ -1549,8 +1567,8 @@ async function findContactByPhone(env, instanceUrl, phone) {
  */
 async function createContactDeduped(env, instanceUrl, phone, contactBody) {
   return createRecordDeduped(env, instanceUrl, "Contact", { ...contactBody, ...extraFields(env, "Contact") },
-    `SELECT Id, FirstName, LastName, Phone, Email, Description FROM Contact WHERE ` +
-    `${phoneMatchClause(["Phone", "MobilePhone", "HomePhone", "OtherPhone"], phone)} ` +
+    `SELECT Id, FirstName, LastName, Phone, Email, Description FROM Contact WHERE (` +
+    `${identityMatchClause(env, ["Phone", "MobilePhone", "HomePhone", "OtherPhone"], phone)}) ` +
     `ORDER BY CreatedDate ASC, Id ASC`, phone);
 }
 
