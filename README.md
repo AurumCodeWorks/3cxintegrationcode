@@ -282,6 +282,8 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 
 ## What it cannot do
 
+- **Store call transcripts, on this PBX** — 3CX posts the call journal the instant a call ends, and transcription runs asynchronously for several minutes afterwards. `[Transcription]`, `[Summary]` and `[Sentiment]` are therefore empty at the only moment 3CX asks for them, while `[RecordingUrl]` is populated because the file already exists. Confirmed live on 3 September 2026: calls with transcripts visible in 3CX Recordings reached Salesforce with none. No 3CX setting delays journaling until transcription completes. Salesforce gets the call metadata and the recording link; the transcript stays in 3CX.
+
 - **Run two CRM integrations on one 3CX PBX** — a 3CX limit. Testing against a second Salesforce org means either a second PBX or switching the Worker URL for a test window.
 - **Reveal `PROXY_API_KEY`** — it's a Cloudflare secret. It can be replaced, never read back. Keep a copy when you rotate it.
 - **Guarantee dedup at database level *without* an External ID field** — the guarantee is available (see above) but requires the org to add a unique External ID field. Until then it stays query-then-create with race convergence.
