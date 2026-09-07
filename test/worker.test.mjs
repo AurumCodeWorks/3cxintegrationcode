@@ -43,7 +43,10 @@ const delete204 = { match: r => r.method === "DELETE", reply: { status: 204 } };
 
 // Route matchers for the worker's internal queries (URLSearchParams encodes
 // spaces as +):
-const byPhone = r => r.method === "GET" && r.url.includes("FROM+Contact+WHERE+Phone");
+// The identity clause is parenthesised and may lead with the External ID
+// field, so match on the WHERE and exclude the by-id lookup rather than
+// pinning to whichever column happens to come first.
+const byPhone = r => r.method === "GET" && r.url.includes("FROM+Contact+WHERE") && !r.url.includes("WHERE+Id");
 const byId = r => r.method === "GET" && r.url.includes("FROM+Contact+WHERE+Id");
 // The reminder lookup and the transferred-leg merge lookup both read Task,
 // so these matchers must stay mutually exclusive.
@@ -1162,54 +1165,105 @@ await runTest("empty-AccountId query short-circuited locally", async () => {
 // ── Structural dedup via a unique External ID field ─────────────────────
 
 const upsertEnv = { ...env, SALESFORCE_EXTERNAL_ID_FIELD: "Phone_E164__c" };
-const upsertCall = r => r.method === "PATCH" && r.url.includes("/sobjects/Contact/Phone_E164__c/");
+const keyGet   = r => r.method === "GET" && r.url.includes("/sobjects/Contact/Phone_E164__c/");
+const keyQuery = r => r.method === "GET" && r.url.includes("WHERE+Phone_E164__c");
+const anyWrite = r => ["POST", "PATCH", "DELETE"].includes(r.method) && r.url.includes("/sobjects/Contact");
 
-// X1: with the field configured, creation becomes an upsert keyed on it
-await runTest("external id: ring-time create becomes a keyed upsert", async () => {
+// X1: unknown caller — the key is absent, so a record is inserted carrying it
+await runTest("external id: absent key inserts, carrying the key", async () => {
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
-    { match: upsertCall, reply: { json: { id: "003UPS000000001AAA", created: true }, status: 201 } },
-    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003UPS000000001AAA", FirstName: "Unregistered Contact", LastName: "+447911123456", Phone: "+447911123456" }] } }
+    { match: keyGet, reply: { json: [{ errorCode: "NOT_FOUND" }], status: 404 } },
+    { match: keyQuery, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003UPS000000001AAA", FirstName: "Unregistered Contact", LastName: "+447911123456", Phone: "+447911123456" }] } },
+    { match: byPhone, reply: { records: [] } },
+    { match: contactPost, reply: { json: { id: "003UPS000000001AAA" }, status: 201 } }
   ];
   const res = await worker.fetch(
     lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"), upsertEnv, makeCtx());
 
-  const upsert = calls.find(upsertCall);
-  check(!!upsert, "upsert issued against the external id endpoint");
-  check(decodeURIComponent(upsert.url).endsWith("/Phone_E164__c/+447911123456"), "keyed on the E.164 number");
-  check(!calls.some(contactPost), "no plain insert, so no create race to converge");
-  check(!calls.some(c => c.method === "DELETE"), "no duplicate cleanup needed");
+  check(!!calls.find(keyGet), "looked the key up before writing anything");
+  const insert = calls.find(contactPost);
+  check(!!insert, "inserted the record");
+  check(JSON.parse(insert.body).Phone_E164__c === "+447911123456", "external id written on insert");
+  check(!calls.some(c => c.method === "PATCH" && c.url.includes("Phone_E164__c/")), "never PATCHes the key endpoint");
   check((await res.json()).searchRecords[0].Id === "003UPS000000001AAA", "record returned to 3CX");
 });
 
-// X2: a second simultaneous call matches rather than creating a duplicate
-await runTest("external id: concurrent call matches instead of duplicating", async () => {
+// X2: THE REGRESSION. A curated record whose Phone the finder cannot match,
+// but whose External ID does. Before read-before-write this PATCHed the
+// ring-time placeholder over it, erasing the name and every call block.
+await runTest("external id: never overwrites a record the phone finder missed", async () => {
+  const curated = {
+    Id: "003CURATED0001AAA",
+    FirstName: "Margaret",
+    LastName: "Hale",
+    Phone: "07911 123 456",
+    Description: "14 previous calls and staff notes"
+  };
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
-    { match: upsertCall, reply: { json: { id: "003UPS000000001AAA", created: false }, status: 200 } },
-    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003UPS000000001AAA", FirstName: "Unregistered Contact", LastName: "+447911123456", Phone: "+447911123456" }] } }
+    { match: keyGet, reply: { json: curated, status: 200 } },
+    { match: keyQuery, reply: { records: [curated] } },
+    { match: byPhone, reply: { records: [] } },
+    { match: anyWrite, reply: { json: { id: "SHOULD_NOT_HAPPEN" }, status: 201 } }
   ];
   const res = await worker.fetch(
     lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"), upsertEnv, makeCtx());
-  check((await res.json()).searchRecords[0].Id === "003UPS000000001AAA", "same record, no second one created");
-  check(!calls.some(c => c.method === "DELETE"), "nothing to clean up");
+
+  check(!calls.some(anyWrite), "NOTHING is written to the matched record");
+  const returned = (await res.json()).searchRecords[0];
+  check(returned.Id === "003CURATED0001AAA", "the existing record is handed back to 3CX");
+  check(returned.FirstName === "Margaret" && returned.LastName === "Hale", "human-entered name intact");
 });
 
-// X3: a misconfigured field name must not stop records being created
-await runTest("external id: bad field name falls back to create-then-converge", async () => {
+// X3: a simultaneous insert loses to the unique constraint and adopts the winner
+await runTest("external id: insert race adopts the winner", async () => {
+  const winner = { Id: "003WIN00000001AAA", FirstName: "Unregistered Contact", LastName: "+447911123456", Phone: "+447911123456" };
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
-    { match: upsertCall, reply: { json: [{ errorCode: "NOT_FOUND" }], status: 404 } },
-    { match: contactPost, reply: { json: { id: "003FBK000000001AAA" }, status: 201 } },
-    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003FBK000000001AAA", Phone: "+447911123456" }] } }
+    { match: keyGet, reply: { json: [{ errorCode: "NOT_FOUND" }], status: 404 } },
+    { match: keyQuery, reply: { records: [winner] } },
+    { match: byPhone, reply: { records: [] } },
+    { match: contactPost, reply: { json: [{ errorCode: "DUPLICATE_VALUE", message: "duplicate value found" }], status: 400 } }
   ];
   const res = await worker.fetch(
     lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"), upsertEnv, makeCtx());
-  check(calls.some(contactPost), "fell back to a normal insert");
-  check((await res.json()).searchRecords[0].Id === "003FBK000000001AAA", "caller still gets a record");
+
+  check((await res.json()).searchRecords[0].Id === "003WIN00000001AAA", "adopted the record that won the race");
+  check(!calls.some(c => c.method === "DELETE"), "no convergence delete needed, the constraint did the work");
+});
+
+// X4: the finder itself now searches the external id, so the miss never happens
+await runTest("external id: the finder searches the key as well as the phone fields", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [{ Id: "003FOUND000001AAA", FirstName: "Margaret", LastName: "Hale", Phone: "07911 123 456" }] } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"), upsertEnv, makeCtx());
+
+  // Turn the URL's "+" separators into %20 BEFORE decoding, so the literal
+  // plus in "+447911123456" (encoded %2B) survives as a plus.
+  const q = decodeURIComponent(calls.find(byPhone).url.replace(/\+/g, "%20"));
+  check(q.includes("Phone_E164__c = '+447911123456'"), "identity query includes the external id");
+  check((await res.json()).searchRecords[0].Id === "003FOUND000001AAA", "curated record found without any write");
+  check(!calls.some(anyWrite), "and nothing written");
+});
+
+// X5: without the field configured, the query is unchanged
+await runTest("external id: unconfigured leaves the identity query alone", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [{ Id: "003PLAIN00001AAA", Phone: "+447911123456" }] } }
+  ];
+  await worker.fetch(lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)"), env, makeCtx());
+  const q = decodeURIComponent(calls.find(byPhone).url);
+  check(!q.includes("Phone_E164__c"), "no external id clause when the variable is unset");
 });
 
 // ── Background failure visibility ───────────────────────────────────────

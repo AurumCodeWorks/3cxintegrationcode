@@ -944,7 +944,7 @@ const PERSON_ACCOUNT_FIELDS =
 async function findPersonAccountByPhone(env, instanceUrl, phone) {
   const records = await sfQuery(env, instanceUrl,
     `SELECT ${PERSON_ACCOUNT_FIELDS} FROM Account WHERE IsPersonAccount = true AND (` +
-    `${phoneMatchClause(["Phone", "PersonMobilePhone", "PersonHomePhone", "PersonOtherPhone"], phone)}) ` +
+    `${identityMatchClause(env, ["Phone", "PersonMobilePhone", "PersonHomePhone", "PersonOtherPhone"], phone)}) ` +
     `ORDER BY CreatedDate ASC, Id ASC`);
 
   if (records === null) return { record: null, failed: true };
@@ -960,7 +960,7 @@ const LEAD_FIELDS = "Id, FirstName, LastName, Phone, MobilePhone, Email, Descrip
 async function findOpenLeadByPhone(env, instanceUrl, phone) {
   const records = await sfQuery(env, instanceUrl,
     `SELECT ${LEAD_FIELDS} FROM Lead WHERE IsConverted = false AND (` +
-    `${phoneMatchClause(["Phone", "MobilePhone"], phone)}) ` +
+    `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ` +
     `ORDER BY CreatedDate ASC, Id ASC`);
 
   if (records === null) return { record: null, failed: true };
@@ -1016,6 +1016,23 @@ function externalIdField(env) {
 }
 
 /**
+ * Match clause for "is this caller already on file", covering both ways a
+ * record can carry the number.
+ *
+ * The two must agree. phoneMatchClause compares standard phone fields with
+ * an exact-string SOQL IN over phoneVariants, so a number a human typed as
+ * "07911 123 456" is not in the list and misses — while the same record's
+ * External ID holds the canonical "+447911123456" and matches. Searching
+ * only the phone fields therefore reports "no such caller" for a record the
+ * writer is about to find, which is how a curated record gets overwritten.
+ */
+function identityMatchClause(env, fields, phone) {
+  const field = externalIdField(env);
+  const byPhone = phoneMatchClause(fields, phone);
+  return field ? `${field} = '${phone}' OR ${byPhone}` : byPhone;
+}
+
+/**
  * Upsert keyed on the org's unique External ID field. Two simultaneous
  * calls from one number cannot both create a record: Salesforce enforces
  * uniqueness, so the second becomes an update of the first.
@@ -1026,40 +1043,76 @@ function externalIdField(env) {
  * records being created at all.
  */
 async function upsertByExternalId(env, instanceUrl, objectType, field, phone, body, convergeSoql) {
-  const url = `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}/` +
-              `${encodeURIComponent(field)}/${encodeURIComponent(phone)}`;
+  // Read the record's own fields back by key rather than through
+  // convergeSoql, which matches on phone variants and can miss the very
+  // record the key just found.
+  const selected = (convergeSoql.match(/^SELECT\s+([\s\S]*?)\s+FROM\s/i) || [])[1] || "Id";
+  const readByKey = () => sfQuery(env, instanceUrl,
+    `SELECT ${selected} FROM ${objectType} WHERE ${field} = '${phone}' LIMIT 1`);
 
-  // The key field is carried in the URL; repeating it in the body is
-  // rejected by some API versions.
-  const payload = { ...body };
-  delete payload[field];
+  // Look before writing.
+  //
+  // PATCHing the external-id endpoint is Salesforce's upsert, and on a match
+  // it applies the WHOLE body. The body here is the ring-time placeholder:
+  // FirstName "Unregistered Contact", LastName the number, and a two-line
+  // Description. Applied to a record a human has since named, that erases
+  // the name and every appended call block, then leaves the record looking
+  // unregistered again so the reminder loop restarts. Salesforce keeps no
+  // recoverable history for long text areas, so it is not undoable.
+  //
+  // The uniqueness guarantee comes from the field's own unique constraint
+  // rejecting a second insert. It does not require PATCH.
+  const keyUrl = `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}/` +
+                 `${encodeURIComponent(field)}/${encodeURIComponent(phone)}`;
+  const existing = await sfFetch(env, keyUrl, { method: "GET" });
 
-  const response = await sfFetch(env, url, { method: "PATCH", body: JSON.stringify(payload) });
-
-  if (!response.ok) {
-    console.error(`Upsert on ${objectType}.${field} failed (${response.status}): ${await response.text()}`);
+  if (existing.ok) {
+    const records = await readByKey();
+    const found = records && records[0];
+    if (found) {
+      console.log(`Matched existing ${objectType} ${found.Id} on ${field} — left untouched`);
+      return { record: found, isNew: false };
+    }
+    // Readable by key but not by query: treat as unknown rather than
+    // creating a second record that the unique constraint would reject.
+    console.error(`${objectType} matched on ${field} but could not be re-read; not creating.`);
     return null;
   }
 
-  // 201 = created, 200 = matched an existing record. 204 carries no body,
-  // so the id comes from the re-query below either way.
-  let id = null;
-  let isNew = response.status === 201;
-  if (response.status !== 204) {
-    const result = await response.json().catch(() => ({}));
-    id = result.id || null;
-    if (typeof result.created === "boolean") isNew = result.created;
+  if (existing.status !== 404) {
+    console.error(`Lookup on ${objectType}.${field} failed (${existing.status}): ${await existing.text()}`);
+    return null;
   }
 
-  // Re-read for server-populated fields such as PersonContactId.
-  const records = await sfQuery(env, instanceUrl, convergeSoql);
-  const mine = records && (records.find(r => r.Id === id) || records[0]);
-  if (mine) {
-    console.log(`Upserted ${objectType} ${mine.Id} on ${field} (${isNew ? "created" : "matched existing"})`);
-    return { record: mine, isNew };
+  // Genuinely absent: insert, carrying the key.
+  const created = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}`, {
+    method: "POST",
+    body: JSON.stringify({ ...body, [field]: phone })
+  });
+
+  if (created.ok) {
+    const id = (await created.json().catch(() => ({}))).id || null;
+    const records = await readByKey();
+    const mine = records && records[0];
+    console.log(`Created ${objectType} ${(mine && mine.Id) || id} with ${field} ${phone}`);
+    return mine ? { record: mine, isNew: true }
+                : (id ? { record: { Id: id, ...body }, isNew: true } : null);
   }
 
-  return id ? { record: { Id: id, ...body }, isNew } : null;
+  // A simultaneous call inserted first and the unique constraint refused
+  // ours. That is the guarantee working: adopt the winner.
+  const errorText = await created.text();
+  if (/DUPLICATE_VALUE|duplicate value found/i.test(errorText)) {
+    const records = await readByKey();
+    const winner = records && records[0];
+    if (winner) {
+      console.log(`Race on ${field} ${phone}: adopted existing ${objectType} ${winner.Id}`);
+      return { record: winner, isNew: false };
+    }
+  }
+
+  console.error(`Insert on ${objectType} with ${field} failed (${created.status}): ${errorText}`);
+  return null;
 }
 
 /**
@@ -1463,8 +1516,8 @@ async function resolveJournaledRecord(env, instanceUrl, whoId) {
  */
 async function findContactByPhone(env, instanceUrl, phone) {
   const records = await sfQuery(env, instanceUrl,
-    `SELECT Id, FirstName, LastName, Phone, Email, Description FROM Contact WHERE ` +
-    `${phoneMatchClause(["Phone", "MobilePhone", "HomePhone", "OtherPhone"], phone)} ` +
+    `SELECT Id, FirstName, LastName, Phone, Email, Description FROM Contact WHERE (` +
+    `${identityMatchClause(env, ["Phone", "MobilePhone", "HomePhone", "OtherPhone"], phone)}) ` +
     `ORDER BY CreatedDate ASC, Id ASC`);
 
   if (records && records.length > 0) {
