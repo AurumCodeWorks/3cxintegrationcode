@@ -286,7 +286,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 
 - **Run two CRM integrations on one 3CX PBX** — a 3CX limit. Testing against a second Salesforce org means either a second PBX or switching the Worker URL for a test window.
 - **Reveal `PROXY_API_KEY`** — it's a Cloudflare secret. It can be replaced, never read back. Keep a copy when you rotate it.
-- **Guarantee dedup at database level *without* an External ID field** — the guarantee is available (see above) but requires the org to add a unique External ID field. Until then it stays query-then-create with race convergence.
+- **Guarantee dedup at database level *without* an External ID field** — available and enabled for Cedar Care (`Phone_E164__c`); without it the fallback stays query-then-create with race convergence.
 - **Match or create business Accounts** — company records are only found by 3CX's own passthrough lookup. Only Contacts, Person Accounts and Leads are auto-created.
 - **Auto-convert Leads** — deliberate. Conversion stays a human decision.
 - **Correlate transferred legs with certainty** — 3CX gives CRM templates no call id, so consolidation matches on caller plus timing. A genuine second call within the window is appended to the previous one. Shorten `CALL_MERGE_WINDOW_MINUTES` if that happens often.
@@ -301,7 +301,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                           # 254 checks — no network, no credentials needed
+npm test                           # 268 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions

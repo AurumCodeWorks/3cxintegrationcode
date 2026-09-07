@@ -44,3 +44,7 @@ keep_vars = true
 [env.cedarcare.vars]
 SALESFORCE_LOGIN_URL = "https://cedarcarehomes--uat.sandbox.my.salesforce.com"
 SALESFORCE_ORG_MODEL = "personaccount"
+# Unique External ID on Account, Contact and Lead, backfilled on all existing
+# Person Accounts. Makes duplicates impossible at database level, and gives
+# Cedar Care's duplicate rule a number to match on instead of a name.
+SALESFORCE_EXTERNAL_ID_FIELD = "Phone_E164__c"

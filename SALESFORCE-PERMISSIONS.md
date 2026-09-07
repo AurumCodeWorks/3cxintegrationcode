@@ -33,6 +33,7 @@ Read is enough for everything except the handful the Worker writes to, marked be
 
 | Field | Access |
 |---|---|
+| Phone_E164__c *(if used as External ID)* | Read + **Edit** |
 | FirstName, LastName | Read + **Edit** |
 | Phone | Read + **Edit** |
 | Description | Read + **Edit** |
@@ -45,6 +46,7 @@ The four phone fields beyond `Phone` are all matched against when identifying a 
 
 | Field | Access |
 |---|---|
+| Phone_E164__c *(if used as External ID)* | Read + **Edit** |
 | FirstName, LastName | Read + **Edit** |
 | Phone | Read + **Edit** |
 | Description | Read + **Edit** |
