@@ -450,6 +450,23 @@ Then, and this is the step that is normally missed:
 
 Setting the department and leaving everything on *Use department settings* is the least fragile arrangement, because a new extension or group then inherits correctly instead of silently defaulting to nothing.
 
+### Stereo recording, and why it matters for transcription
+
+**Admin Console → Advanced → Parameters → `MS_CALLRECORDING_STEREO`** ("Enable stereo call recording"). Added in **V20 Update 8**.
+
+> **This one is global, not per department.** Recording and transcription inherit down the department hierarchy; the channel format does not participate in that at all. One switch, whole PBX. A department-level hunt for it finds nothing, and the recordings stay mono.
+
+Mono forces the transcription engine to work out who is speaking from a single mixed channel. Diarisation from mono runs at roughly **80-90% accuracy**, degrading with similar voices, background noise and more than two speakers. Stereo puts each party on their own channel, so speaker attribution stops being a guess.
+
+That accuracy ceiling matters more in a care setting than elsewhere: a line mis-attributed to a nurse rather than a caller reads as authoritative in the record, which is worse than a line simply missing.
+
+Two things are undocumented, so test rather than assume:
+
+- **Engine compatibility.** The feature was built alongside 3CX's own transcription service and is an Enterprise feature. Whether it applies when transcription is provided by OpenAI Whisper or Google is not stated anywhere.
+- **Channel assignment.** Nobody has confirmed whether the agent is always the left channel, or whether it flips between inbound and outbound. Behaviour with more than two speakers, which any transfer or conference produces, is unspecified.
+
+Make one inbound and one outbound test call after enabling it and check whether the agent lands on the same channel in both.
+
 ### What deliberately stays off
 
 Auto attendants and queue legs are menu prompts and hold music. There is nothing said to transcribe and the audio is worthless, so leave recording off for those extensions. The **time** spent there is still captured: 3CX reports the duration on the call journal regardless, and the Salesforce integration renders a routing leg as a single line rather than an empty call block:
