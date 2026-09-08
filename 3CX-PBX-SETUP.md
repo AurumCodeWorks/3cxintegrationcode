@@ -462,7 +462,7 @@ That accuracy ceiling matters more in a care setting than elsewhere: a line mis-
 
 Two things are undocumented, so test rather than assume:
 
-- **Engine compatibility.** The feature was built alongside 3CX's own transcription service and is an Enterprise feature. Whether it applies when transcription is provided by OpenAI Whisper or Google is not stated anywhere.
+- **Engine compatibility.** The forum discussion implies it is tied to 3CX's own transcription service. It is not: with **Grok** selected as the provider there is a **Stereo Mode** checkbox in Integrations → Transcription, alongside the global parameter. Both have to be on. Confirmed working on a third-party provider on 2026-09-08.
 - **Channel assignment.** Nobody has confirmed whether the agent is always the left channel, or whether it flips between inbound and outbound. Behaviour with more than two speakers, which any transfer or conference produces, is unspecified.
 
 Make one inbound and one outbound test call after enabling it and check whether the agent lands on the same channel in both.
