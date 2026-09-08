@@ -410,6 +410,17 @@ Configure:
 | Storage location and quota | Recordings fill disks quietly and then calls stop recording silently. |
 | Announcement to callers | "This call may be recorded" is normally expected, and often required. |
 
+> **Set recording and transcription on the ring groups and queues as well as the extensions.**
+> An inbound call lands on whatever answers the DDI first and takes that object's setting, not
+> the answering extension's. Observed live on 2026-09-08: the same caller, one minute apart,
+> produced no transcript on the leg answered via the DDI and a full transcript on the leg after
+> the transfer. The symptom reads as "outbound transcribes, inbound does not", which looks like
+> a direction bug and is a configuration gap.
+
+> **Transcription requires a recording.** Every transcribed leg was recorded and no unrecorded
+> leg was ever transcribed, so switch recording on first and confirm it before chasing missing
+> transcripts.
+
 ### On the client's transfer clause
 
 They asked whether recording can stop during an internal transfer and resume when the new person connects.
