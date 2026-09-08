@@ -2,8 +2,8 @@
 
 A Cloudflare Worker that sits between a 3CX phone system and Salesforce so that **calls from numbers that aren't in the CRM still get logged**, with their AI transcription, against a real Salesforce record — without creating duplicates.
 
-- **Worker:** `3cx-salesforce-proxy` → https://3cx-salesforce-proxy.autumn-truth-82d5.workers.dev
-- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v44)
+- **Worker:** `3cx-salesforce-proxy-cedarcare` -> https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev
+- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v45)
 - **Salesforce API:** v55.0, OAuth 2.0 client-credentials flow
 
 ---
@@ -166,14 +166,13 @@ Everything else has a working default. Review [the 3CX settings table](#3cx-sett
 
 ### Reusing this Worker for another 3CX
 
-A second PBX does **not** need its own Worker. Skip steps 1 and 2 entirely: upload the same [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) to the new PBX and enter the same Worker URL and the same Proxy API Key. That is the whole job.
+A second PBX does **not** need its own Worker. Upload the same [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) to the new PBX and enter the same Worker URL and Proxy API Key.
 
-Two things to be clear about before you do:
+Both PBXs then write into the same Salesforce org, because the credentials and `SALESFORCE_ORG_MODEL` live on the Worker rather than in the template. A **different** org needs a second Worker.
 
-- **Both PBXs write into the same Salesforce org.** The org credentials and `SALESFORCE_ORG_MODEL` live on the Worker, not in the template, so every PBX pointing at a Worker shares its Salesforce destination. If the second environment needs a *different* org, deploy a second Worker (`name` in [wrangler.toml](wrangler.toml)) with its own variables, and point the new PBX at that instead.
-- **The API key is shared.** Rotating it locks out every PBX until each one is updated. Since Cloudflare cannot show you an existing key, setting up a second PBX without your saved copy means rotating once and re-pasting into both.
+> **Think hard before running two.** Two near-identical Worker URLs caused a live misconfiguration here. Pointing a PBX at the wrong one returns 401 when the keys differ, and when they match it silently writes that PBX's calls into the wrong org, which nobody notices until someone goes looking for records that were never created. A second Worker was deleted on 2026-09-08 for exactly this reason.
 
-Per-PBX behaviour still varies independently, because call filtering, auto-create policy and transcript handling are template parameters sent as request headers, not Worker variables. A head office PBX can journal everything while a satellite site logs inbound only.
+Per-PBX behaviour still varies independently, because call filtering, auto-create policy and transcript handling are template parameters sent as request headers, not Worker variables. A head office PBX can journal everything while a satellite logs inbound only, off the same Worker.
 
 ### Step 4 — Verify
 
