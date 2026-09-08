@@ -23,7 +23,7 @@ Work through it in order. Each phase depends on the one before, and several diag
 10. [Digital receptionist and barge-in](#phase-9--digital-receptionist-and-barge-in)
 11. [Business hours and holidays](#phase-10--business-hours-and-holidays)
 12. [Voicemail, music on hold, prompts](#phase-11--voicemail-music-on-hold-prompts)
-13. [Call recording and retention](#phase-12--call-recording-and-retention)
+13. [Call recording and transcription](#phase-12--call-recording-and-transcription)
 14. [Spam filter](#phase-13--spam-filter)
 15. [The Salesforce integration](#phase-14--the-salesforce-integration)
 16. [Backups and monitoring](#phase-15--backups-and-monitoring)
@@ -395,39 +395,108 @@ Add public holidays for any line that genuinely closes, typically head office an
 
 ---
 
-## Phase 12 — Call recording and retention
+## Phase 12 — Call recording and transcription
 
-**Where:** Admin Console → **Settings** → **Recordings** for retention and storage. Whether an individual extension records is set on the user record under **Users**.
+Recording and transcription are configured at **four independent levels**, and the one that applies to a given call is decided by *what answered it*, not by who ended up speaking. Get that wrong and the symptom is maddening: outbound calls transcribe, inbound calls do not, and the extension's own settings look perfect.
 
-Care home call recordings are very likely **special category health data** under UK GDPR. This is a compliance decision for the client, not a technical default, and it should be recorded in writing before go-live.
+### The mental model
 
-Configure:
+| Level | Where | Governs |
+|---|---|---|
+| **System** | Admin Console → Integrations → Transcription | Which AI provider does the work. Nothing transcribes until this exists. |
+| **Department** | Departments → *the department* → Options | The default every user, queue and ring group inherits |
+| **Queue / Ring Group** | Voice & Chat → Queues or Ring Groups → *the object* → Transcription Options | Calls **answered through that object** |
+| **User / Extension** | Users → *the user* → Options | Calls the extension originates or answers directly |
+
+The extension setting has a **Use department settings** option, which is how inheritance is expressed. An explicit value on the extension overrides the department; the same is true for a queue or ring group.
+
+> **The rule that catches everyone: an inbound call to a DID is answered by the ring group or queue, so it takes *that object's* setting. The extension's setting never gets a look in.** Outbound calls originate at the extension, so those do use the extension's setting. That asymmetry is why a correctly configured extension transcribes outbound and not inbound.
+
+### Step 1 — Choose a transcription provider
+
+**Admin Console → Integrations → Transcription.**
+
+| Option | Notes |
+|---|---|
+| 3CX OnBoard engine | Runs on the PBX |
+| OpenAI Whisper | Needs an OpenAI API key with billing enabled |
+| Google Cloud Speech | Needs Google credentials |
+
+> **Licensing changed in V20 Update 8.** Transcription and summaries now require an **Enterprise+ licence or the OnBoard engine**; the cloud service no longer provides them otherwise. On any other licence you must supply your own OpenAI or Google credentials. If nothing transcribes anywhere, check this before touching per-object settings.
+
+### Step 2 — Recording, because transcription depends on it
+
+Nothing is transcribed that was not recorded. Switch recording on and confirm it first, or you will spend a day chasing transcription for calls that have no audio.
+
+Recording is configurable per **extension**, per **queue**, and per **trunk**.
+
+**Users → *the user* → Options → Call Recordings → Record Calls → `Record all calls`.**
+
+Then the same for every **queue and ring group** that answers a DID, since that object handles the inbound leg.
+
+**Admin Console → Settings → Recordings** holds retention, storage location and quota.
+
+> Recordings fill a disk quietly and then recording stops with no obvious error. Set a quota and a retention period rather than discovering the ceiling during an incident.
+
+### Step 3 — Transcription, at every level a call can arrive through
+
+**Users → *the user* → Options → Transcription → Select what to transcribe.** Options include *Voicemails & Recordings*, *Recordings only*, and *Use department settings*.
+
+Then, and this is the step that is normally missed:
+
+- **Departments → *each department* → Options** — set it here and everything beneath inherits
+- **Voice & Chat → Ring Groups → *each group* → Transcription Options**
+- **Voice & Chat → Queues → *each queue* → Transcription Options**
+
+Setting the department and leaving everything on *Use department settings* is the least fragile arrangement, because a new extension or group then inherits correctly instead of silently defaulting to nothing.
+
+### What deliberately stays off
+
+Auto attendants and queue legs are menu prompts and hold music. There is nothing said to transcribe and the audio is worthless, so leave recording off for those extensions. The **time** spent there is still captured: 3CX reports the duration on the call journal regardless, and the Salesforce integration renders a routing leg as a single line rather than an empty call block:
+
+```
+Routed via extension 1001 at 12:21, held 04:35.
+```
+
+List those extensions under **System Extensions** in the CRM template so they are treated as routing rather than as callers.
+
+### Verifying, one level at a time
+
+1. **Provider works at all** — Admin Console → Recordings, pick any call, press **Transcribe**. Text appears, so the provider and licence are fine and every remaining problem is a per-object setting.
+2. **Outbound** — dial out from an extension, wait a minute, check Recordings for a transcript with no manual step.
+3. **Inbound direct** — temporarily point one DID's inbound rule straight at an extension, bypassing the group, and ring it. Transcribes, so the extension is right and the group is the gap.
+4. **Inbound via the group** — restore the rule and ring again. This is the case that fails when the ring group or queue has no transcription setting.
+
+Steps 3 and 4 isolate the problem in two calls, which beats hunting through settings.
+
+### The consequence for the CRM
+
+**Only transcription that completes before the call is journaled reaches Salesforce.** 3CX posts the call journal once, at hangup, carrying whatever the transcript field held at that instant, and never revisits it.
+
+So **transcribing a call by hand afterwards populates 3CX and does nothing for Salesforce.** Verified on 2026-09-08: three calls manually transcribed in 3CX still had empty transcripts in Salesforce, and their Tasks had not been modified since creation. The one call that transcribed automatically did carry its transcript through.
+
+If automatic transcription cannot be made to work for a given path, the transcript will never reach the CRM for calls on that path, and manual re-transcription is not a workaround.
+
+### Retention, and who decides
+
+Care home call recordings are very likely **special category health data** under UK GDPR. That is a compliance decision for the client, not a technical default, and it belongs in writing before go-live.
 
 | Setting | Consideration |
 |---|---|
-| Which extensions record | All, some, or none. Reception and clinical lines carry the most sensitive content. |
+| Which extensions record | Reception and clinical lines carry the most sensitive content |
 | Retention period | Set it deliberately and short. Indefinite retention is the default failure. |
-| Storage location and quota | Recordings fill disks quietly and then calls stop recording silently. |
-| Announcement to callers | "This call may be recorded" is normally expected, and often required. |
+| Storage and quota | See the warning above |
+| Announcement to callers | "This call may be recorded" is normally expected, and often required |
 
-> **Set recording and transcription on the ring groups and queues as well as the extensions.**
-> An inbound call lands on whatever answers the DDI first and takes that object's setting, not
-> the answering extension's. Observed live on 2026-09-08: the same caller, one minute apart,
-> produced no transcript on the leg answered via the DDI and a full transcript on the leg after
-> the transfer. The symptom reads as "outbound transcribes, inbound does not", which looks like
-> a direction bug and is a configuration gap.
-
-> **Transcription requires a recording.** Every transcribed leg was recorded and no unrecorded
-> leg was ever transcribed, so switch recording on first and confirm it before chasing missing
-> transcripts.
+The integration can log a call while withholding everything said on it — see **Confidential Extensions** in [README.md](README.md) — so recording for operational purposes and keeping content out of the CRM are separate decisions.
 
 ### On the client's transfer clause
 
 They asked whether recording can stop during an internal transfer and resume when the new person connects.
 
-**3CX records per extension leg, not per conversation.** A transferred call therefore already produces separate recordings for each leg rather than one continuous file, which approximates the requested behaviour without configuration. There is also manual pause and resume in the Web Client for the PCI use case, if a member of staff needs to take card details.
+**3CX records per extension leg, not per conversation.** A transferred call already produces separate recordings per leg rather than one continuous file, which approximates the requested behaviour with no configuration. There is also manual pause and resume in the Web Client for the PCI case, where a member of staff takes card details.
 
-Worth confirming with them whether "stops recording" means a genuine compliance requirement or simply the expectation that the hold portion is not captured, because those lead to different answers.
+Worth confirming whether "stops recording" is a genuine compliance requirement or just the expectation that the hold portion is not captured, because those lead to different answers.
 
 ---
 
