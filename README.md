@@ -57,12 +57,12 @@ The sections below describe what happens once a call qualifies. A template older
                   ├─ match found?  ──▶ pass it straight back to 3CX
                   │
                   └─ no match:
-                       ├─ filtered number?     ──▶ return empty (nothing happens at all)
-                       ├─ auto-create off?     ──▶ return empty
-                       └─ otherwise: CREATE the record now, return it to 3CX
+                       ├─ filtered number?          ──▶ return empty (nothing happens at all)
+                       ├─ outbound, or no tracked queues set ──▶ return empty
+                       └─ otherwise: return a New Caller stand-in, decide when the call ends
 ```
 
-Because the record is **real**, the agent sees a normal CRM match on their phone and the **(CRM) link opens an editable Salesforce record mid-call**.
+An existing record is a real match, so the **(CRM) link opens it mid-call**. A new caller's record is created when the call ends, only if it came through a tracked queue (see above). A template older than v46 instead creates the record here, at ring time.
 
 The number is canonicalised to E.164 (`07700900123` → `+447700900123`) so lookups, stored records and dedup all agree.
 
@@ -341,7 +341,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                           # 334 checks — no network, no credentials needed
+npm test                           # 341 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions

@@ -1023,7 +1023,11 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
         // Finding an existing record is always worth doing: Salesforce's own
         // SOSL misses records stored in national format, and whether we may
         // CREATE a record is a separate question from whether one exists.
-        const mayCreate = !gated && shouldAutoCreate(requestHeaders);
+        // An older template creates at ring time, so an excluded extension
+        // has to be honoured here too, whenever 3CX supplies [Agent].
+        const lookupAgent = extensionFromHeader(requestHeaders, "X-Agent-Extension");
+        const excluded = lookupAgent && isExcludedExtension(requestHeaders, lookupAgent);
+        const mayCreate = !gated && !excluded && shouldAutoCreate(requestHeaders);
         const { target, created } = await locateRecord(env, instanceUrl, phone, mayCreate);
 
         if (target && target.whoId) {
@@ -1133,7 +1137,17 @@ async function locateRecord(env, instanceUrl, phone, mayCreate, names = null) {
   if (contact.record) return { target: contactResult(contact.record) };
   if (contact.failed) return failed;
 
-  if (!mayCreate) return { target: null };
+  if (!mayCreate) {
+    // Creating would find a converted Lead through its unique key. A call
+    // that may not create (a missed or untracked leg) has to look for one
+    // itself, or someone already converted is reported as unknown.
+    if (model === "lead") {
+      const converted = await findConvertedLeadByPhone(env, instanceUrl, phone);
+      if (converted.record) return convertedLeadResult(converted.record);
+      if (converted.failed) return failed;
+    }
+    return { target: null };
+  }
 
   if (model === "lead") {
     return outcome(await createLeadDeduped(env, instanceUrl, phone, names), r => leadResult(r, phone));
@@ -1159,6 +1173,17 @@ function convertedLeadResult(lead) {
       Email: lead.Email
     }
   };
+}
+
+/** The most recently converted Lead for this number that became a record. */
+async function findConvertedLeadByPhone(env, instanceUrl, phone) {
+  const records = await sfQuery(env, instanceUrl,
+    `SELECT Id, FirstName, LastName, Phone, Email, ConvertedContactId FROM Lead ` +
+    `WHERE IsConverted = true AND ConvertedContactId != null AND (` +
+    `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ORDER BY ConvertedDate DESC LIMIT 1`);
+
+  if (records === null) return { record: null, failed: true };
+  return { record: records[0] || null, failed: false };
 }
 
 /** A Contact under a business Account, never a Person Account's hidden one. */
@@ -2267,17 +2292,27 @@ async function maintainJournaledRecord(env, routingExts, instanceUrl, whoId, tas
     // rather than whoever dealt with the caller. Leaving the name as the
     // bare number keeps the record eligible, and the next leg — the human
     // one — stamps it instead.
+    // The three writes are independent. A rename Salesforce refuses must not
+    // stop the transcript reaching the record or the reminder being raised,
+    // so each is attempted and every failure is reported together.
+    const failures = [];
+    const attempt = async (step) => {
+      try { await step(); } catch (error) { failures.push(error.message || String(error)); }
+    };
+
     if (record.FirstName === DEFAULT_FIRST_NAME &&
         !isRoutingExtension(routingExts, call.agent) &&
         (record.LastName === call.phone || record.LastName === recordPhone(record))) {
-      await sfWrite(env, recordUrl, {
+      await attempt(() => sfWrite(env, recordUrl, {
         method: "PATCH",
         body: JSON.stringify({ LastName: nameInfo.lastName })
-      });
+      }));
     }
 
-    await appendCallToRecord(env, routingExts, instanceUrl, objectType, record, call, description, nameInfo.hintLine);
-    await upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, taskBody.OwnerId);
+    await attempt(() => appendCallToRecord(env, routingExts, instanceUrl, objectType, record, call, description, nameInfo.hintLine));
+    await attempt(() => upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, taskBody.OwnerId));
+
+    if (failures.length > 0) throw new Error(failures.join("; "));
   } catch (error) {
     console.error("Record/alert maintenance failed:", error);
     await reportMaintenanceFailure(env, instanceUrl, whoId, error, taskBody.OwnerId);

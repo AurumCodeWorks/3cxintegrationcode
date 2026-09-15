@@ -589,7 +589,7 @@ In order, because each depends on the last:
 14. Call recording on and retention set, or deliberately off and documented
 15. Spam action is not End Call
 16. Backup taken and a restore tested
-17. CRM: with `npm run tail` running, an unknown caller creates a record at ring time and the transcription lands afterwards
+17. CRM: with `npm run tail` running, an unknown caller through a tracked queue shows as New Caller while ringing, and when the call ends the log says `created Lead` and the record and reminder appear with the transcription
 18. CRM: the same number called twice produces **one** record and **one** open reminder
 
 ---

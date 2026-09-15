@@ -40,6 +40,7 @@ Read is enough for everything except the handful the Worker writes to, marked be
 | Description | Read + **Edit** |
 | MobilePhone, HomePhone, OtherPhone, AssistantPhone | Read |
 | Fax, Title, Department, Email, AccountId | Read |
+| IsPersonAccount | Read. The Worker uses it to tell a business Contact from a Person Account's hidden one, before raising an enquiry and when resolving which record a call belongs to |
 
 The four phone fields beyond `Phone` are all matched against when identifying a caller. Hiding any one narrows who the system can recognise.
 
@@ -64,7 +65,7 @@ The four phone fields beyond `Phone` are all matched against when identifying a 
 | FirstName, LastName | Read + **Edit** |
 | Phone, Description | Read + **Edit** |
 | Phone_E164__c *(if used as External ID)* | Read + **Edit** |
-| MobilePhone, Email, Title, Fax, Company, IsConverted, ConvertedContactId | Read |
+| MobilePhone, Email, Title, Fax, Company, IsConverted, ConvertedContactId, ConvertedDate | Read |
 
 `Company` must be **writable and not required**, because a Lead with a blank Company is what converts into a Person Account rather than a business Account plus Contact.
 

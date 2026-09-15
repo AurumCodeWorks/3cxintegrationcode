@@ -2244,6 +2244,62 @@ await runTest("gaps: enquiry named home first from 3CX departments", async () =>
   check(!contactPatches().some(p => p.body.LastName), "not renamed after creation");
 });
 
+// G19: a rename Salesforce refuses does not stop the append or the reminder
+await runTest("gaps: refused rename still appends the call and raises the reminder", async () => {
+  routes = [
+    tokenRoute,
+    { match: taskPost, reply: (r, hits) => ({ json: { id: `00TGAP0000000019A${hits}` }, status: 201 }) },
+    { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+    noRecentCall,
+    { match: r => r.method === "GET" && r.url.includes("3CX+Integration+Error"), reply: { records: [] } },
+    { match: byTask, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "00TGAP0000000019AA" }] } },
+    { match: r => r.method === "PATCH" && r.url.includes("/sobjects/Contact/") && (r.body || "").includes("LastName"),
+      reply: { status: 400, json: [{ errorCode: "FIELD_CUSTOM_VALIDATION_EXCEPTION" }] } },
+    patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(contactPatches().some(p => p.body.Description), "call still appended to the record");
+  check(!!alertTaskPost(), "reminder still raised");
+  check(!!failureTaskPost(), "the refused rename is reported");
+});
+
+// G20: a converted Lead is found on a call that may not create a record
+await runTest("gaps: converted Lead found on an untracked missed call", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byAccountPhone, reply: { records: [] } },
+    { match: r => r.method === "GET" && urlHas(r, "IsConverted = true"),
+      reply: { records: [{ Id: "00QOLD0000000001AA", ConvertedContactId: "003CONV000000002AA" }] } },
+    { match: byLeadPhone, reply: { records: [] } },
+    noBusinessContact,
+    { match: taskPost, reply: { json: { id: "00TGAP0000000020AA" }, status: 201 } },
+    { match: byAccountContactId, reply: { records: [personAccount("001CONV000000002AA", "003CONV000000002AA", "+447911123456", { FirstName: "Jean", LastName: "Smith" })] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204
+  ];
+  const ctx = makeCtx();
+  const missed = header("Missed call from 447911123456 to 102");
+  await worker.fetch(taskRequest(callTaskBody(standIn, missed), tracked()), leadEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(forwardedCallTask()?.WhoId === "003CONV000000002AA", "logged against the converted record");
+  check(!calls.some(leadPost), "nothing created");
+});
+
+// G21: an older template honours Excluded Extensions at ring time too
+await runTest("gaps: pre-v46 lookup creates nothing for an excluded extension", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [] } }
+  ];
+  const res = await worker.fetch(lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)",
+    { "X-Agent-Extension": "999", "X-Excluded-Extensions": "999" }), env, makeCtx());
+  check((await res.json()).searchRecords.length === 0, "lookup stays empty");
+  check(contactPosts().length === 0, "no record created");
+});
+
 // G10 (last, since it sets the External ID aside for the rest of the run):
 // a missing or hidden key field degrades to phone matching instead of stopping creation
 await runTest("gaps: broken External ID field falls back to phone matching", async () => {
