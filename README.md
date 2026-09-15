@@ -238,7 +238,7 @@ If any of that misbehaves, [Troubleshooting](#troubleshooting) covers the usual 
 
 ### Cloudflare variables
 
-*Dashboard → Workers & Pages → your worker → Settings → Variables and Secrets*, except the three marked **wrangler.toml**, which are deployed with the code. `keep_vars = true` stops a deploy wiping the dashboard values.
+*Dashboard → Workers & Pages → your worker → Settings → Variables and Secrets*, except those marked **wrangler.toml**, which are deployed with the code. `keep_vars = true` stops a deploy wiping the dashboard values.
 
 | Name | Type | Purpose |
 |---|---|---|
@@ -248,7 +248,7 @@ If any of that misbehaves, [Troubleshooting](#troubleshooting) covers the usual 
 | `HOME_COUNTRY` | var | ISO country for reading national-format numbers (default `GB`) |
 | `MIN_SEARCH_LENGTH` | var | Type-ahead searches shorter than this are answered locally (default `3`) |
 | `CALL_MERGE_WINDOW_MINUTES` | var | Transferred-leg consolidation window (default `5`, `0` disables) |
-| `THREECX_URL` | var | The PBX's web address, e.g. `https://cedarcare.3cx.co.uk`. With the two secrets below, home names are read from 3CX departments |
+| `THREECX_URL` | wrangler.toml | The PBX's web address, `https://cedarcare.my3cx.uk`. With the two secrets below, home names are read from 3CX departments |
 | `THREECX_CLIENT_ID` | secret | Client ID of the 3CX API client (Admin → Integrations → API, with Configuration API access and the System Admin role) |
 | `THREECX_CLIENT_SECRET` | secret | That API client's secret, shown once when it is created |
 | `EXTENSION_DEPARTMENTS` | var | Fallback only, when the 3CX API is not configured: JSON map of extension or prefix to home name, e.g. `{"03":"Arbour Walk"}`. Longest prefix wins |

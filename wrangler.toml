@@ -19,7 +19,6 @@ compatibility_date = "2024-03-01"
 #   - HOME_COUNTRY                 (default GB)
 #   - MIN_SEARCH_LENGTH            (default 3)
 #   - CALL_MERGE_WINDOW_MINUTES    (default 5, 0 disables)
-#   - THREECX_URL                  (PBX web address; home names from 3CX departments)
 #   - THREECX_CLIENT_ID            (secret, 3CX API client)
 #   - THREECX_CLIENT_SECRET        (secret, 3CX API client)
 #   - EXTENSION_DEPARTMENTS        (fallback home-name map when the 3CX API is not set)
@@ -47,3 +46,6 @@ SALESFORCE_ORG_MODEL = "lead"
 # Person Account. Makes duplicates impossible at database level, and gives
 # Cedar Care's duplicate rule a number to match on rather than a name.
 SALESFORCE_EXTERNAL_ID_FIELD = "Phone_E164__c"
+# The PBX whose departments name the homes. Its API client id and secret are
+# the THREECX_CLIENT_ID and THREECX_CLIENT_SECRET secrets.
+THREECX_URL = "https://cedarcare.my3cx.uk"
