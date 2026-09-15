@@ -267,9 +267,10 @@ await runTest("first journaling enriches contact and creates reminder", async ()
   check(/^\+447911123456 \(Inbound \d{2}:\d{2}, Ext 102\)$/.test(stampPatch?.body.LastName || ""),
     `direction/time/ext stamped onto the name (got "${stampPatch?.body.LastName}")`);
   const descPatch = contactPatches().find(p => p.body.Description);
-  check(descPatch?.body.Description.includes("my name is Sarah Jones"), "transcription appended to contact");
-  check(descPatch?.body.Description.includes('Possible caller name mentioned: "Sarah Jones"'), "name recorded as an unverified hint");
-  check(descPatch?.body.Description.includes("unverified"), "hint is explicitly marked unverified");
+  check(!descPatch?.body.Description.includes("my name is Sarah Jones"), "transcription kept off the contact");
+  check(forwardedCallTask()?.Description.includes("my name is Sarah Jones"), "transcription stays on the call log");
+  check(!descPatch?.body.Description.includes("Sarah Jones"), "no name heard on the call written to the record");
+  check(alertTaskPost()?.Description.includes("(unverified, from call transcription)"), "hint is explicitly marked unverified");
   check(descPatch?.body.Description.includes("Auto-created from the 3CX"), "ring-time history preserved");
   const alert = alertTaskPost();
   check(alert?.WhoId === "003RING00000001AAA", "reminder linked to contact");
@@ -298,7 +299,7 @@ await runTest("repeat journaling updates contact + reminder (no duplicates)", as
   check(contactPosts().length === 0, "no second contact created");
   const descPatch = contactPatches().find(p => p.body.Description);
   check(descPatch?.body.Description.includes("First call details here."), "existing history preserved");
-  check(descPatch?.body.Description.includes("my name is Sarah Jones"), "second transcription appended");
+  check(descPatch?.body.Description.includes("15:00 · Inbound · 0:35"), "second call added to the history");
   check(!alertTaskPost(), "no duplicate reminder created");
   const reminderPatch = taskPatches().find(p => p.body.Description);
   check(reminderPatch?.body.Description.includes("Original reminder text"), "reminder history preserved");
@@ -878,8 +879,8 @@ await runTest("personaccount: journaling updates the Account, not a Contact", as
   check(!calls.some(c => c.method === "PATCH" && c.url.includes("/sobjects/Contact/")), "backing Contact left alone");
   const patches = calls.filter(c => c.method === "PATCH" && c.url.includes("/sobjects/Account/")).map(c => JSON.parse(c.body));
   check(!patches.some(p => p.FirstName), "name never auto-written onto the Account");
-  check(patches.some(p => (p.Description || "").includes("my name is Sarah Jones")), "transcript appended to the Account");
-  check(patches.some(p => (p.Description || "").includes('Possible caller name mentioned: "Sarah Jones"')), "hint recorded on the Account");
+  check(patches.some(p => (p.Description || "").includes("Answered by ext 102")), "call added to the Account's history");
+  check(!patches.some(p => (p.Description || "").includes("Sarah Jones")), "nothing said on the call written to the Account");
   check(alertTaskPost()?.WhoId === "003PC0000000001AAA", "reminder links to the person contact id");
 });
 
@@ -977,8 +978,8 @@ await runTest("lead: journaling updates the Lead and asks for qualification", as
 
   const leadPatches = calls.filter(c => c.method === "PATCH" && c.url.includes("/sobjects/Lead/")).map(c => JSON.parse(c.body));
   check(!leadPatches.some(p => p.FirstName), "name never auto-written onto the Lead");
-  check(leadPatches.some(p => (p.Description || "").includes("my name is Sarah Jones")), "transcript appended to the Lead");
-  check(leadPatches.some(p => (p.Description || "").includes('Possible caller name mentioned: "Sarah Jones"')), "hint recorded on the Lead");
+  check(leadPatches.some(p => (p.Description || "").includes("Answered by ext 102")), "call added to the Lead's history");
+  check(!leadPatches.some(p => (p.Description || "").includes("Sarah Jones")), "nothing said on the call written to the Lead");
   const alert = alertTaskPost();
   check(alert?.WhoId === "00QLD0000000001AAA", "reminder linked to the Lead");
   check(alert?.Description.includes("convert the Lead"), "reminder asks for Lead qualification");
@@ -1083,8 +1084,9 @@ await runTest("real introduction is recorded as a hint, not as the name", async 
   await Promise.all(ctx.tasks);
   check(!contactPatches().some(p => p.body.FirstName), "name field left as Unregistered Contact");
   const descPatch = contactPatches().find(p => p.body.Description);
-  check(descPatch?.body.Description.includes('Possible caller name mentioned: "Kieran Paling"'),
-    "detected name surfaced as an unverified hint");
+  check(alertTaskPost()?.Description.includes('Possible caller name mentioned: "Kieran Paling"'),
+    "detected name surfaced as an unverified hint on the reminder");
+  check(!(descPatch?.body.Description || "").includes("Kieran"), "and kept off the record itself");
 });
 
 // S1: type-ahead searches shorter than the minimum never reach Salesforce
@@ -1458,7 +1460,8 @@ await runTest("history: caller's own name is not echoed back into their history"
   const d = appendedDescription();
   check(!d.includes("Answered incoming call from"), "3CX's raw line not pasted into the record");
   check(!d.includes("Unregistered Contact +447911123456 to"), "display name not echoed");
-  check(d.includes("Transcript: Hello my name is Sarah Jones"), "transcript still kept");
+  check(!d.includes("Sarah Jones"), "transcript kept off the record");
+  check(d.includes("Recording: https://example.com/rec.wav"), "recording link kept");
 });
 
 // R3: sections with no content are dropped rather than left as empty headings
@@ -1554,11 +1557,11 @@ await runTest("routing: the human leg still stamps and logs in full", async () =
 
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
   check(name.includes("Ext 102"), `real extension stamps the name (got "${name}")`);
-  check(appendedDescription().includes("Transcript: Hello my name is Sarah Jones"), "full entry for a real conversation");
+  check(appendedDescription().includes("Answered by ext 102"), "entry names who took the call");
 });
 
-// S4: a routing leg that somehow carries a transcript is not discarded
-await runTest("routing: a routing leg with a transcript keeps it", async () => {
+// S4: a routing leg that somehow carries a transcript keeps it on its call log
+await runTest("routing: a routing leg's transcript stays on its call log", async () => {
   const talkingIvr = ivrDescription.replace("Transcription: \n", "Transcription: Caller asked for the nursing team\n");
   routes = maintenanceRoutes();
   const ctx = makeCtx();
@@ -1566,8 +1569,8 @@ await runTest("routing: a routing leg with a transcript keeps it", async () => {
   await Promise.all(ctx.tasks);
 
   const d = appendedDescription();
-  check(d.includes("Caller asked for the nursing team"), "transcript preserved");
-  check(d.includes("Transcript: Caller asked for the nursing team"), "kept in full because something was said");
+  check(!d.includes("Caller asked for the nursing team"), "transcript kept off the record");
+  check((forwardedCallTask()?.Description || "").includes("Caller asked for the nursing team"), "transcript kept on the call log");
 });
 
 // S5: a PBX still on an older template falls back to the variable
@@ -1622,7 +1625,7 @@ await runTest("routing: entries without a wildcard stay exact", async () => {
 
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
   check(name.includes("Ext 1050"), `"10" does not swallow 1050 (got "${name}")`);
-  check(appendedDescription().includes("Hello, this is the nursing team"), "treated as a real conversation");
+  check(appendedDescription().includes("Answered by ext 1050"), "treated as a person, not a menu");
 });
 
 // ── Call history format ─────────────────────────────────────────────────
@@ -1662,7 +1665,8 @@ await runTest("history: receptionist and answering legs become one entry", async
   check((d.match(/^\d{1,2} [A-Z][a-z]{2} \d{4} \d{1,2}:\d{2} · /gm) || []).length === 1, "still a single entry");
   check(d.includes(`${ukToday} 15:00 · Inbound · 1:31`), "durations added together");
   check(d.includes("Arbour Walk menu 1001 (0:56), then ext 102 (0:35)"), "route shows both legs");
-  check(d.includes("Transcript: Hello my name is Sarah Jones"), "what was said is added");
+  check(d.includes("Recording: https://example.com/rec.wav"), "the recording link is added");
+  check(!d.includes("Sarah Jones"), "what was said is not");
   check(d.startsWith("New enquiry through Arbour Walk (queue 800)"), "opening lines kept");
 });
 
@@ -1684,7 +1688,7 @@ await runTest("history: newest call first, and a person's notes are left alone",
 // H3: when the field fills, the oldest calls go, never the notes
 await runTest("history: oldest calls dropped to fit, notes kept", async () => {
   const old = Array.from({ length: 40 }, (_, i) =>
-    `1 Aug 2026 ${String(i % 24).padStart(2, "0")}:00 · Inbound · 1:00\nAnswered by ext 105\nTranscript: ${"words ".repeat(160)}`);
+    `1 Aug 2026 ${String(i % 24).padStart(2, "0")}:00 · Inbound · 1:00\nAnswered by ext 105\nRecording: https://example.com/${"r".repeat(960)}`);
   const existing = historyOf(...old) + "\n\nNotes: keep this";
   routes = historyRoutes(enquiryRecord(existing), [noRecentCall]);
   const ctx = makeCtx();
@@ -2413,6 +2417,426 @@ await runTest("gaps: pre-v46 lookup creates nothing for an excluded extension", 
     { "X-Agent-Extension": "999", "X-Excluded-Extensions": "999" }), env, makeCtx());
   check((await res.json()).searchRecords.length === 0, "lookup stays empty");
   check(contactPosts().length === 0, "no record created");
+});
+
+// ── Aligned with Cedar Care's Salesforce answers ────────────────────────
+// Care home on the Lead for assignment, an owner when 3CX finds no user, the
+// words of a call kept to the call log for retention, the My Domain login,
+// and duplicate rules set to Allow not refusing API inserts.
+
+const homeEnv = { ...leadEnv, EXTENSION_DEPARTMENTS: '{"800":"Arbour Walk","102":"Arbour Walk"}' };
+const hook = r => r.url.startsWith("https://hooks.example/");
+const webhookTexts = () => calls.filter(hook).map(c => JSON.parse(c.body).text || "");
+const leadPosts = () => calls.filter(leadPost).map(c => ({ body: JSON.parse(c.body), headers: c.headers }));
+const callLogPosts = () => calls.filter(taskPost).map(c => JSON.parse(c.body)).filter(b => b.Subject === "3CX PhoneSystem Call");
+const enquiryLead = { Id: "00QHOME000000001AA", FirstName: "Arbour Walk", LastName: "Enquiry +447911123456 (17 Jul 15:00)", Phone: "+447911123456" };
+
+// Lead-mode routes for an enquiry answered through queue 800. leadReply
+// decides how the Lead insert is answered.
+const enquiryRoutes = (leadReply, extra = []) => [
+  tokenRoute,
+  ...extra,
+  { match: hook, reply: { ok: true } },
+  { match: byAccountPhone, reply: { records: [] } },
+  { match: byLeadPhone, reply: (r, hits) => hits % 2 === 1 ? { records: [] } : { records: [enquiryLead] } },
+  noBusinessContact,
+  { match: leadPost, reply: leadReply },
+  { match: taskPost, reply: { json: { id: "00TALIGN000000001A" }, status: 201 } },
+  { match: byLeadId, reply: { records: [enquiryLead] } },
+  noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+];
+const created201 = { json: { id: "00QHOME000000001AA" }, status: 201 };
+const enquiryCall = () => taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" }));
+
+// A1: the home goes onto the Lead, where its assignment rule can see it
+await runTest("aligned: care home stamped on the Lead at creation", async () => {
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Care_Home__c" }, ctx);
+  await Promise.all(ctx.tasks);
+  const [insert] = leadPosts();
+  check(insert?.body.Care_Home__c === "Arbour Walk", `Care_Home__c is the 3CX department (got "${insert?.body.Care_Home__c}")`);
+  check(insert?.body.FirstName === "Arbour Walk", "still named after the home");
+  check(forwardedCallTask()?.WhoId === "00QHOME000000001AA", "call linked to the new Lead");
+});
+
+// A2: a duplicate rule set to Allow does not refuse the insert; only record inserts say so
+await runTest("aligned: record inserts allow saves past Allow duplicate rules", async () => {
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), homeEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts()[0]?.headers.get("Sforce-Duplicate-Rule-Header") === "allowSave=true", "Lead insert carries allowSave=true");
+  check(!calls.filter(taskPost).some(c => c.headers.get("Sforce-Duplicate-Rule-Header")), "Task inserts do not");
+  check(!calls.filter(c => c.method === "PATCH").some(c => c.headers.get("Sforce-Duplicate-Rule-Header")), "updates do not");
+  check(!("Care_Home__c" in (leadPosts()[0]?.body || {})), "no home field unless one is configured");
+});
+
+// A3: a map translates department names into the field's own values
+await runTest("aligned: SALESFORCE_HOME_VALUES maps departments to picklist values", async () => {
+  routes = enquiryRoutes(created201);
+  let ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Care_Home__c",
+    SALESFORCE_HOME_VALUES: '{"arbour walk":"Arbour Walk Care Home"}' }, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts()[0]?.body.Care_Home__c === "Arbour Walk Care Home", "mapped value used, matched regardless of case");
+
+  calls = [];
+  routes = enquiryRoutes(created201);
+  ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Care_Home__c",
+    SALESFORCE_HOME_VALUES: '{"Oakhill":"Oakhill House"}' }, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts().length === 1 && leadPosts()[0].body.Care_Home__c === "Arbour Walk",
+    "a home the map does not list is sent as 3CX names it");
+});
+
+// A4: a value the picklist will not take costs the field, never the Lead
+await runTest("aligned: refused care home value retried without it and reported", async () => {
+  routes = enquiryRoutes(r => JSON.parse(r.body).Care_Home__c
+    ? { status: 400, json: [{ message: "bad value for restricted picklist field: Arbour Walk", errorCode: "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST", fields: ["Care_Home__c"] }] }
+    : created201);
+  const ctx = makeCtx();
+  const res = await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Care_Home__c",
+    SALESFORCE_EXTRA_FIELDS: '{"Lead":{"LeadSource":"Phone Enquiry"}}', ALERT_WEBHOOK_URL: "https://hooks.example/alert" }, ctx);
+  await Promise.all(ctx.tasks);
+  const posts = leadPosts();
+  check(res.status === 201, "call logged");
+  check(posts.length === 2, `retried once (got ${posts.length} inserts)`);
+  check(posts[1] && !("Care_Home__c" in posts[1].body), "retry leaves the refused field out");
+  check(posts[1]?.body.LeadSource === "Phone Enquiry", "and keeps the fields that were fine");
+  check(forwardedCallTask()?.WhoId === "00QHOME000000001AA", "the enquiry still has its Lead");
+  check(webhookTexts().some(t => t.includes("Care_Home__c")), "someone is told the home was not set");
+
+  // The next enquiry from the same home does not offer the refused value again.
+  calls = [];
+  routes = enquiryRoutes(r => JSON.parse(r.body).Care_Home__c
+    ? { status: 400, json: [{ message: "bad value for restricted picklist field: Arbour Walk", errorCode: "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST", fields: ["Care_Home__c"] }] }
+    : created201);
+  const ctx2 = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Care_Home__c",
+    SALESFORCE_EXTRA_FIELDS: '{"Lead":{"LeadSource":"Phone Enquiry"}}', ALERT_WEBHOOK_URL: "https://hooks.example/alert" }, ctx2);
+  await Promise.all(ctx2.tasks);
+  check(leadPosts().length === 1 && !("Care_Home__c" in leadPosts()[0].body), "refused value not sent again");
+  check(webhookTexts().length === 0, "and not reported again");
+});
+
+// A5: a refused Lead Source value (not added to the picklist yet) is handled the same way
+await runTest("aligned: refused Lead Source retried without it", async () => {
+  routes = enquiryRoutes(r => JSON.parse(r.body).LeadSource
+    ? { status: 400, json: [{ message: "bad value for restricted picklist field: Phone Enquiry", errorCode: "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST", fields: ["LeadSource"] }] }
+    : created201);
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Home_Site__c",
+    SALESFORCE_EXTRA_FIELDS: '{"Lead":{"LeadSource":"Phone Enquiry"}}' }, ctx);
+  await Promise.all(ctx.tasks);
+  const posts = leadPosts();
+  check(posts.length === 2 && !("LeadSource" in posts[1].body), "Lead Source left out of the retry");
+  check(posts[1]?.body.Home_Site__c === "Arbour Walk", "care home kept");
+});
+
+// A5b: only the refusal's own code and fields count, not a trigger's failure that mentions the field
+await runTest("aligned: a deeper failure naming the home field does not drop it", async () => {
+  routes = enquiryRoutes({ status: 400, json: [{
+    errorCode: "CANNOT_INSERT_UPDATE_ACTIVATE_ENTITY",
+    message: "LeadTrigger: execution of AfterInsert caused by: System.QueryException: No such column 'Home_Nested__c' on entity 'Lead'",
+    fields: []
+  }] });
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Home_Nested__c" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts().length === 1, "not retried: the Lead itself was refused");
+
+  calls = [];
+  routes = enquiryRoutes(created201);
+  const ctx2 = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Home_Nested__c" }, ctx2);
+  await Promise.all(ctx2.tasks);
+  check(leadPosts()[0]?.body.Home_Nested__c === "Arbour Walk", "and the field is still sent next time");
+});
+
+// A5c: a lookup field given a name rather than an id costs the field
+await runTest("aligned: MALFORMED_ID on the home field retried without it", async () => {
+  routes = enquiryRoutes(r => JSON.parse(r.body).Home_Lookup__c
+    ? { status: 400, json: [{ errorCode: "MALFORMED_ID", message: "Care Home: id value of incorrect type: Arbour Walk", fields: ["Home_Lookup__c"] }] }
+    : created201);
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Home_Lookup__c" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts().length === 2 && !("Home_Lookup__c" in leadPosts()[1].body), "retried without the lookup");
+  check(forwardedCallTask()?.WhoId === "00QHOME000000001AA", "the enquiry still has its Lead");
+});
+
+// A5d: a value refusal that names no field sets every optional field aside
+await runTest("aligned: JSON_PARSER_ERROR retries without the optional fields", async () => {
+  routes = enquiryRoutes(r => JSON.parse(r.body).Home_Parsed__c
+    ? { status: 400, json: [{ errorCode: "JSON_PARSER_ERROR", message: "Cannot deserialize instance of boolean from VALUE_STRING value Arbour Walk at [line:1, column:120]" }] }
+    : created201);
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Home_Parsed__c" }, ctx);
+  await Promise.all(ctx.tasks);
+  const posts = leadPosts();
+  check(posts.length === 2 && !("Home_Parsed__c" in posts[1].body), "retried without it");
+  check(posts[1]?.body.FirstName === "Arbour Walk" && posts[1]?.body.Phone === "+447911123456", "core fields untouched");
+});
+
+// A5e: a refused field is reported even when the insert still fails afterwards
+await runTest("aligned: a field set aside is reported even if the retry fails", async () => {
+  routes = enquiryRoutes(r => JSON.parse(r.body).Home_Hidden__c
+    ? { status: 400, json: [{ errorCode: "INVALID_FIELD_FOR_INSERT_UPDATE", message: "Unable to create/update fields: Home_Hidden__c. Please check the security settings of this field.", fields: ["Home_Hidden__c"] }] }
+    : { status: 400, json: [{ errorCode: "UNABLE_TO_LOCK_ROW", message: "unable to obtain exclusive access to this record" }] });
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, SALESFORCE_HOME_FIELD: "Home_Hidden__c", ALERT_WEBHOOK_URL: "https://hooks.example/alert" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(webhookTexts().some(t => t.includes("Home_Hidden__c")), "the unwritable field is reported");
+  check(!forwardedCallTask()?.WhoId, "the enquiry itself still logged unlinked");
+});
+
+// A6: a field the org has not built is left off every later insert
+await runTest("aligned: a missing home field is set aside after one refusal", async () => {
+  const missing = r => JSON.parse(r.body).Home_Not_Built__c
+    ? { status: 400, json: [{ message: "No such column 'Home_Not_Built__c' on sobject of type Lead", errorCode: "INVALID_FIELD" }] }
+    : created201;
+  const missingEnv = { ...homeEnv, SALESFORCE_HOME_FIELD: "Home_Not_Built__c" };
+  routes = enquiryRoutes(missing);
+  let ctx = makeCtx();
+  await worker.fetch(enquiryCall(), missingEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts().length === 2, "first enquiry: refused, then created without it");
+
+  calls = [];
+  routes = enquiryRoutes(missing);
+  ctx = makeCtx();
+  await worker.fetch(enquiryCall(), missingEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts().length === 1 && !("Home_Not_Built__c" in leadPosts()[0].body), "next enquiry does not send it at all");
+});
+
+// A7: 3CX found no Salesforce user, so the call log, and its reminder, go to the fallback owner
+await runTest("aligned: fallback owner when 3CX finds no user", async () => {
+  const userQuery = r => r.method === "GET" && r.url.includes("FROM+User");
+  routes = maintenanceRoutes([{ match: userQuery, reply: { records: [{ Id: "005FALLBACK0001AAA" }] } }]);
+  const body = callTaskBody("003RING00000001AAA");
+  delete body.OwnerId;
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(body), { ...env, SALESFORCE_FALLBACK_OWNER: "005FALLBACK0001AAA" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(forwardedCallTask()?.OwnerId === "005FALLBACK0001AAA", "call log owned by the fallback owner");
+  check(alertTaskPost()?.OwnerId === "005FALLBACK0001AAA", "reminder follows it");
+  check(calls.some(c => userQuery(c) && urlHas(c, "IsActive = true") && urlHas(c, "UserType = 'Standard'")),
+    "fallback checked to be an active user who can own Tasks");
+
+  calls = [];
+  routes = maintenanceRoutes([{ match: userQuery, reply: { records: [{ Id: "005FALLBACK0001AAA" }] } }]);
+  const ctx2 = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), { ...env, SALESFORCE_FALLBACK_OWNER: "005FALLBACK0001AAA" }, ctx2);
+  await Promise.all(ctx2.tasks);
+  check(forwardedCallTask()?.OwnerId === "005xx0000012345AAA", "the user 3CX found is kept");
+  check(!calls.some(userQuery), "no owner lookup needed");
+});
+
+// A8: the fallback can be a queue that takes Tasks, named by its API name
+await runTest("aligned: fallback owner can be a Task queue", async () => {
+  const queueQuery = r => r.method === "GET" && r.url.includes("FROM+QueueSobject");
+  routes = maintenanceRoutes([{ match: queueQuery, reply: { records: [{ QueueId: "00GPLACEMENT001AAA" }] } }]);
+  const body = callTaskBody("003RING00000001AAA");
+  delete body.OwnerId;
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(body), { ...env, SALESFORCE_FALLBACK_OWNER: "Central_Placement_Team" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(forwardedCallTask()?.OwnerId === "00GPLACEMENT001AAA", "call log owned by the queue");
+  check(calls.some(c => queueQuery(c) && urlHas(c, "SobjectType = 'Task'")), "queue checked to take Tasks");
+});
+
+// A9: an inactive fallback owner is not used
+await runTest("aligned: inactive fallback owner is set aside", async () => {
+  routes = maintenanceRoutes([{ match: r => r.method === "GET" && r.url.includes("FROM+User"), reply: { records: [] } }]);
+  const body = callTaskBody("003RING00000001AAA");
+  delete body.OwnerId;
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(body), { ...env, SALESFORCE_FALLBACK_OWNER: "005INACTIVE00001AA" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(res.status === 201, "call logged");
+  check(!("OwnerId" in (forwardedCallTask() || {})), "left with the integration user");
+});
+
+// A10: a fallback owner refused at insert costs the owner, not the call log or its link
+await runTest("aligned: refused fallback owner retried without it", async () => {
+  routes = [
+    tokenRoute,
+    { match: r => r.method === "GET" && r.url.includes("FROM+User"), reply: { records: [{ Id: "005REFUSED00001AAA" }] } },
+    { match: taskPost, reply: r => JSON.parse(r.body).OwnerId === "005REFUSED00001AAA"
+      ? { status: 400, json: [{ message: "operation performed with inactive user", errorCode: "INACTIVE_OWNER_OR_USER", fields: ["OwnerId"] }] }
+      : { json: { id: "00TREFUSED0000001A" }, status: 201 } },
+    { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  const body = callTaskBody("003RING00000001AAA");
+  delete body.OwnerId;
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(body), { ...env, SALESFORCE_FALLBACK_OWNER: "005REFUSED00001AAA" }, ctx);
+  await Promise.all(ctx.tasks);
+  const logs = callLogPosts();
+  check(res.status === 201, "call logged");
+  check(logs.length === 2 && !("OwnerId" in logs[1]), "retried without the owner");
+  check(logs[1]?.WhoId === "003RING00000001AAA", "and still linked to the record");
+
+  // Set aside: the next call neither re-checks it nor offers it again.
+  calls = [];
+  const again = callTaskBody("003RING00000001AAA");
+  delete again.OwnerId;
+  const ctx2 = makeCtx();
+  await worker.fetch(taskRequest(again), { ...env, SALESFORCE_FALLBACK_OWNER: "005REFUSED00001AAA" }, ctx2);
+  await Promise.all(ctx2.tasks);
+  check(callLogPosts().length === 1 && !("OwnerId" in callLogPosts()[0]), "refused owner not offered again");
+  check(!calls.some(r => r.method === "GET" && r.url.includes("FROM+User")), "nor checked again within the hour");
+});
+
+// A10b: 3CX's user refused as an owner, so the fallback owner takes the call log
+await runTest("aligned: refused 3CX owner replaced by the fallback owner", async () => {
+  routes = [
+    tokenRoute,
+    { match: r => r.method === "GET" && r.url.includes("FROM+User"), reply: { records: [{ Id: "005FALLBACK0002AAA" }] } },
+    { match: taskPost, reply: r => JSON.parse(r.body).OwnerId === "005xx0000012345AAA"
+      ? { status: 400, json: [{ message: "invalid cross reference id", errorCode: "INVALID_CROSS_REFERENCE_KEY", fields: ["OwnerId"] }] }
+      : { json: { id: "00TOWNER00000001AA" }, status: 201 } },
+    { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")),
+    { ...env, SALESFORCE_FALLBACK_OWNER: "005FALLBACK0002AAA" }, ctx);
+  await Promise.all(ctx.tasks);
+  const logs = callLogPosts();
+  check(res.status === 201, "call logged");
+  check(logs.length === 2 && logs[1].OwnerId === "005FALLBACK0002AAA", "retried with the fallback owner");
+  check(logs[1]?.WhoId === "003RING00000001AAA", "still linked");
+  check(alertTaskPost()?.OwnerId === "005FALLBACK0002AAA", "reminder follows the owner the call log got");
+});
+
+// A10c: a reminder whose owner is refused is still raised
+await runTest("aligned: refused reminder owner costs the owner, not the reminder", async () => {
+  routes = [
+    tokenRoute,
+    { match: taskPost, reply: r => {
+      const b = JSON.parse(r.body);
+      return (b.Subject || "").startsWith("Action Required") && b.OwnerId
+        ? { status: 400, json: [{ message: "owner is inactive", errorCode: "INACTIVE_OWNER_OR_USER", fields: ["OwnerId"] }] }
+        : { json: { id: "00TREMIND0000001AA" }, status: 201 };
+    } },
+    { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  const reminders = calls.filter(taskPost).map(c => JSON.parse(c.body)).filter(b => (b.Subject || "").startsWith("Action Required"));
+  check(reminders.length === 2 && !("OwnerId" in reminders[1]), "reminder saved again without the owner");
+  check(!calls.filter(taskPost).some(c => (JSON.parse(c.body).Subject || "").startsWith("3CX Integration Error")), "no failure alert needed");
+});
+
+// A11: words from calls already in a record's history go the next time it is written
+await runTest("aligned: transcripts already in a history are removed on the next call", async () => {
+  const existing = historyOf(
+    "1 Sep 2026 09:00 · Inbound · 2:00\nAnswered by ext 105\n" +
+    'Possible caller name mentioned: "Jane Doe" (unverified, from call transcription)\n' +
+    "Transcript: my mother needs nursing care\nand she lives alone\nSummary: Asked about nursing care.\nSentiment: Positive\n" +
+    "Recording: https://example.com/old.wav") + "\n\nNotes: Transcript: typed by a person";
+  routes = historyRoutes(enquiryRecord(existing), [noRecentCall]);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003HIST000000001AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  const d = appendedDescription();
+  check(!/mother|lives alone|nursing care|Jane Doe|Sentiment/.test(d.split("--- end of call history ---")[0]), "old transcript, summary, sentiment and name removed");
+  check(d.includes("1 Sep 2026 09:00 · Inbound · 2:00\nAnswered by ext 105\nRecording: https://example.com/old.wav"), "old entry keeps when, who and the recording");
+  check(d.endsWith("Notes: Transcript: typed by a person"), "a person's notes outside the history untouched");
+});
+
+// A11b: CRLF line endings do not cost an entry its recording link
+await runTest("aligned: recording links survive CRLF descriptions", async () => {
+  const existing = historyOf("1 Sep 2026 09:00 · Inbound · 2:00\r\nAnswered by ext 105\r\nTranscript: words\r\nRecording: https://example.com/crlf.wav");
+  routes = historyRoutes(enquiryRecord(existing), [noRecentCall]);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003HIST000000001AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  const d = appendedDescription();
+  check(d.includes("Answered by ext 105\nRecording: https://example.com/crlf.wav"), "recording kept");
+  check(!d.includes("Transcript: words"), "transcript still removed");
+});
+
+// A11c: a record someone has named gets no new entries, but loses old transcripts
+await runTest("aligned: a named record's history is cut back too", async () => {
+  const named = {
+    Id: "003REG0000000002AA", FirstName: "Jane", LastName: "Smith", Phone: "+447911123456",
+    Description: historyOf("1 Sep 2026 09:00 · Inbound · 2:00\nAnswered by ext 105\nTranscript: private words\nRecording: https://example.com/reg.wav") +
+      "\n\nNotes: keep"
+  };
+  routes = historyRoutes(named, [noRecentCall]);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003REG0000000002AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  const d = appendedDescription();
+  check(d && !d.includes("private words"), "transcript removed");
+  check(d.includes("Recording: https://example.com/reg.wav") && d.endsWith("Notes: keep"), "recording and notes kept");
+  check(!d.includes(`${ukToday} 15:00`), "no new entry on a named record");
+
+  calls = [];
+  routes = historyRoutes({ ...named, Description: historyOf("1 Sep 2026 09:00 · Inbound · 2:00\nAnswered by ext 105") }, [noRecentCall]);
+  const ctx2 = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003REG0000000002AA")), env, ctx2);
+  await Promise.all(ctx2.tasks);
+  check(contactPatches().length === 0, "a clean history is left alone");
+});
+
+// A12: an enquiry that could not be given a record says so, without the whole number
+await runTest("aligned: tracked enquiry with no record raises an alert", async () => {
+  routes = [
+    tokenRoute,
+    { match: hook, reply: { ok: true } },
+    { match: byAccountPhone, reply: { status: 500, json: [{ errorCode: "SERVER_ERROR" }] } },
+    { match: taskPost, reply: { json: { id: "00TUNLINKED000001A" }, status: 201 } }
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, ALERT_WEBHOOK_URL: "https://hooks.example/alert" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(forwardedCallTask() && !forwardedCallTask().WhoId, "call log saved unlinked");
+  const text = webhookTexts().join("\n");
+  check(text.includes("could not be given a Salesforce record"), "alert raised");
+  check(text.includes("queue 800") && !text.includes("7911123456"), "names the queue, masks the number");
+});
+
+// A12b: that alert is not sent when the call log was not saved either
+await runTest("aligned: no 'saved unlinked' alert when the call log also failed", async () => {
+  routes = [
+    tokenRoute,
+    { match: hook, reply: { ok: true } },
+    { match: byAccountPhone, reply: { status: 500, json: [{ errorCode: "SERVER_ERROR" }] } },
+    { match: taskPost, reply: { status: 500, json: [{ errorCode: "SERVER_ERROR" }] } }
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), { ...homeEnv, ALERT_WEBHOOK_URL: "https://hooks.example/alert" }, ctx);
+  await Promise.all(ctx.tasks);
+  const texts = webhookTexts();
+  check(!texts.some(t => t.includes("was saved without one")), "does not claim the call log was saved");
+  check(texts.some(t => t.includes("call log not saved")), "reports that it was not");
+});
+
+// A13: the login URL must be the org's My Domain
+await runTest("aligned: generic Salesforce login hosts refused", async () => {
+  routes = [tokenRoute];
+  const res = await worker.fetch(lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)"),
+    { ...env, SALESFORCE_LOGIN_URL: "https://login.salesforce.com" }, makeCtx());
+  check(res.status === 502, "request refused");
+  check(calls.length === 0, "nothing sent to Salesforce");
+
+  calls = [];
+  const lightning = await worker.fetch(lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)"),
+    { ...env, SALESFORCE_LOGIN_URL: "https://cedarcarehomes.lightning.force.com" }, makeCtx());
+  check(lightning.status === 502 && calls.length === 0, "the Lightning address copied from a browser is refused too");
+
+  const link = await worker.fetch(new Request("https://worker.example/003RING00000001AAA"),
+    { ...env, SALESFORCE_LOGIN_URL: "https://login.example.com/" }, makeCtx());
+  check(link.headers.get("Location") === "https://login.example.com/003RING00000001AAA", "a trailing slash does not double up in record links");
 });
 
 // G10 (last, since it sets the External ID aside for the rest of the run):

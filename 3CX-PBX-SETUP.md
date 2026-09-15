@@ -508,6 +508,8 @@ Care home call recordings are very likely **special category health data** under
 
 The integration can log a call while withholding everything said on it — see **Confidential Extensions** in [README.md](README.md) — so recording for operational purposes and keeping content out of the CRM are separate decisions.
 
+In Salesforce, what was said lives only on the call log Task, never copied onto the Lead or Account (see **Retention** in [README.md](README.md)). The name heard on a call is on the reminder Task (`Action Required: …`), which is not a call Task. Cedar Care's weekly job deletes calls and transcripts after 7 years. **Still to confirm with them:** that it also covers `Action Required:` reminders and `3CX Integration Error:` alerts, or those outlive the call logs they came from.
+
 ### On the client's transfer clause
 
 They asked whether recording can stop during an internal transfer and resume when the new person connects.

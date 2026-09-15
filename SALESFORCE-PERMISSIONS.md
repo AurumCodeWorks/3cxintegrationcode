@@ -14,11 +14,14 @@ Only the objects for your `SALESFORCE_ORG_MODEL` are strictly required, but gran
 
 | Object | Read | Create | Edit | Delete | Why |
 |---|:--:|:--:|:--:|:--:|---|
-| **Contact** | ✅ | ✅ | ✅ | ✅ | Lookup, dedup, ring-time creation, transcript append |
+| **Contact** | ✅ | ✅ | ✅ | ✅ | Lookup, dedup, ring-time creation, call history |
 | **Account** | ✅ | ✅ | ✅ | ✅ | Person Accounts in `personaccount` and `lead` modes |
 | **Lead** | ✅ | ✅ | ✅ | ✅ | `lead` mode, and the template's own Lead lookup |
 | **Task** | ✅ | ✅ | ✅ | ✅ | Call logs, reminder upsert, transferred-leg merge |
-| **User** | ✅ | | | | 3CX's own lookup of the answering agent by email, to set the call's owner |
+| **User** | ✅ | | | | 3CX's own lookup of the answering agent by email, to set the call's owner, and the Worker's check that `SALESFORCE_FALLBACK_OWNER` is an active user |
+| **Queue (QueueSobject)** | ✅ | | | | Only when `SALESFORCE_FALLBACK_OWNER` is a queue: the Worker checks the queue takes Tasks |
+
+**View All and Modify All on Lead, where Lead sharing is Private.** A Lead assignment rule runs as the Worker inserts the Lead, so the Lead can belong to a home's user or queue before the Worker reads it back. Without View All the Worker cannot see the record it just created: the enquiry is logged unlinked, and later calls from that number are not matched. Converted callers need the same on Account and Contact. A sharing rule that shares the routed records with the integration user does the same job.
 
 **Delete is genuinely needed.** When two calls from one number arrive simultaneously, both create a record and the Worker deletes its own loser so a single record survives. Without Delete the convergence fails and you get the duplicate it exists to prevent.
 
@@ -65,9 +68,13 @@ The four phone fields beyond `Phone` are all matched against when identifying a 
 | FirstName, LastName | Read + **Edit** |
 | Phone, Description | Read + **Edit** |
 | Phone_E164__c *(if used as External ID)* | Read + **Edit** |
+| Care_Home__c *(the `SALESFORCE_HOME_FIELD`)* | Read + **Edit** |
+| LeadSource *(if set through `SALESFORCE_EXTRA_FIELDS`)* | Read + **Edit** |
 | MobilePhone, Email, Title, Fax, Company, IsConverted, ConvertedContactId, ConvertedDate | Read |
 
 `Company` must be **writable and not required**, because a Lead with a blank Company is what converts into a Person Account rather than a business Account plus Contact.
+
+A care home or Lead Source the integration user cannot edit is refused once and then left off every insert until the Worker restarts, so the Lead is still created but the assignment rule never sees its home. The script under [Verifying](#verifying) only shows the fields can be **read**: confirm **Edit** on both in the permission set itself.
 
 ### Task
 
@@ -94,7 +101,7 @@ Separately, for a human to convert a Lead in the UI, their profile needs a **def
 
 **Login IP ranges.** If the run-as user's profile restricts login by IP, token requests fail intermittently as Cloudflare's egress address moves. Set the External Client App's **IP Relaxation** to *Relax IP restrictions*.
 
-**Duplicate rules and validation rules** on Contact, Lead and Account. These reject API inserts, and from the phone system's side the failure is invisible.
+**Duplicate rules and validation rules** on Contact, Lead and Account. These reject API inserts, and from the phone system's side the failure is invisible. The Worker opts in to saving past rules set to *Allow*; a rule set to *Block* still refuses the insert.
 
 **Required custom fields.** Any field marked required that the Worker does not populate will block every insert. Supply a value through `SALESFORCE_EXTRA_FIELDS` if so.
 
@@ -102,7 +109,11 @@ Separately, for a human to convert a Lead in the UI, their profile needs a **def
 
 ## Use a dedicated integration user
 
-Not a person's account. Every record the Worker creates is owned by the run-as user, so a leaver being deactivated stops the integration and orphans the records. A named integration user also makes it obvious in the audit trail which changes came from the phone system.
+Not a person's account. Every record the Worker creates is owned by the run-as user unless an assignment rule moves it, so a leaver being deactivated stops the integration and orphans the records. A named integration user also makes it obvious in the audit trail which changes came from the phone system.
+
+Salesforce's client credentials documentation describes the run-as user as a dedicated integration user. Cedar Care's UAT app was switched to the Automated Process User on 15 September 2026; Salesforce documents nothing either way about that user in this role. Whoever it is, it needs everything on this page, so after any change of run-as user run the check below and make one test call.
+
+The Worker only updates Tasks its own run-as user created. Open reminders raised under a previous run-as user are left alone, and the next call from that number raises a fresh one.
 
 ---
 
@@ -119,7 +130,7 @@ for spec in \
   "Contact:MobilePhone" "Contact:Fax" "Contact:Description" \
   "Account:PersonHomePhone" "Account:PersonOtherPhone" "Account:PersonMobilePhone" \
   "Account:PersonContactId" "Account:RecordTypeId" "Account:Fax" \
-  "Lead:MobilePhone" "Lead:Company" "Lead:IsConverted" \
+  "Lead:MobilePhone" "Lead:Company" "Lead:IsConverted" "Lead:Care_Home__c" "Lead:LeadSource" \
   "Task:CallDurationInSeconds" "Task:TaskSubtype" "Task:WhoId"
 do
   O=${spec%%:*}; F=${spec##*:}
@@ -151,7 +162,7 @@ Six fields were hidden from `integration.user@example.com` on a freshly configur
 
 Everything on Lead and Task was accessible, as were the remaining Contact and Account fields.
 
-A seventh, `Contact.Description`, was found later. It is where the call transcript is appended, so the integration would have logged calls without ever recording what was said.
+A seventh, `Contact.Description`, was found later. It is where the call history is written (at the time, with the transcript), so the integration would have logged calls without ever recording them on the record.
 
 After granting all seven, the full chain was verified by exercising it rather than reading checkboxes: create a Person Account, PATCH it, read back `PersonContactId`, delete it. All four succeeded, confirming Create, Edit, Delete, the person record type assignment, and that `PersonContactId` resolves so `Task.WhoId` can link a call log.
 

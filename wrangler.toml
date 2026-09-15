@@ -15,7 +15,9 @@ compatibility_date = "2024-03-01"
 # changed without a deploy. keep_vars stops a deploy wiping those values. It
 # must sit above [vars]: below it, TOML reads it as a variable named keep_vars
 # and every deploy wipes the dashboard values.
-#   - SALESFORCE_EXTRA_FIELDS      (JSON per object type)
+#   - SALESFORCE_EXTRA_FIELDS      (JSON per object type, e.g. Lead Source once the picklist has the value)
+#   - SALESFORCE_HOME_VALUES       (JSON, 3CX department name to Care_Home__c value where they differ)
+#   - SALESFORCE_FALLBACK_OWNER    (user or Task queue for call logs 3CX finds no user for)
 #   - HOME_COUNTRY                 (default GB)
 #   - MIN_SEARCH_LENGTH            (default 3)
 #   - CALL_MERGE_WINDOW_MINUTES    (default 5, 0 disables)
@@ -29,10 +31,15 @@ compatibility_date = "2024-03-01"
 keep_vars = true
 
 # Moving to Cedar Care's PRODUCTION org is a config change, not a deployment:
-# update SALESFORCE_LOGIN_URL below and re-set the two Connected App secrets.
+# set SALESFORCE_LOGIN_URL below to https://cedarcarehomes.my.salesforce.com
+# (the My Domain URL: login.salesforce.com is refused) and re-set the two
+# External Client App secrets.
 # Each "secret put" goes live on its own, so set both in one go to avoid a
 # window where the URL and credentials belong to different orgs:
 #   npx wrangler secret bulk secrets.json   (then delete secrets.json)
+# Then check the dashboard values that name things in one org:
+# SALESFORCE_FALLBACK_OWNER (a UAT user or queue will not exist in production)
+# and SALESFORCE_HOME_VALUES (production's Care_Home__c values).
 # The 3CX template, the Worker URL and the Proxy API Key all stay as they are.
 
 # These define which org this Worker talks to, so they live in code where they
@@ -46,6 +53,10 @@ SALESFORCE_ORG_MODEL = "lead"
 # Person Account. Makes duplicates impossible at database level, and gives
 # Cedar Care's duplicate rule a number to match on rather than a name.
 SALESFORCE_EXTERNAL_ID_FIELD = "Phone_E164__c"
+# A new enquiry's Lead carries its home here, from the 3CX department of the
+# queue it came through, so Cedar Care's Lead assignment rule can route it.
+# A value the field refuses costs the field, not the Lead.
+SALESFORCE_HOME_FIELD = "Care_Home__c"
 # The PBX whose departments name the homes. Its API client id and secret are
 # the THREECX_CLIENT_ID and THREECX_CLIENT_SECRET secrets.
 THREECX_URL = "https://cedarcare.my3cx.uk"

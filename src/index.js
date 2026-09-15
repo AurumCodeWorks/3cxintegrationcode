@@ -3,8 +3,8 @@
  *
  * Intercepts lookups and call journaling from 3CX to Salesforce.
  * Authenticates with Salesforce using OAuth 2.0 Client Credentials Flow.
- * Features customizable business-hours gating, AI name extraction and
- * duplicate-free auto-creation of "Unregistered Contact" records.
+ * Creates a record for an enquiry answered through a tracked queue, logs calls
+ * for callers already on file, and never creates duplicates.
  *
  * Tracked queues (template v46):
  *  - Only calls answered through a listed queue create a record for an
@@ -21,9 +21,9 @@
  *    lookup and returns it to 3CX. The agent therefore sees a genuine CRM
  *    match whose (CRM) link opens the actual record, editable mid-call.
  *  - At call end, 3CX journals the task against that real contact id. The
- *    worker then enriches the contact in the background: appends the call
- *    description/transcription, upgrades the name if the caller introduced
- *    themselves, and upserts the "Action Required" reminder task.
+ *    worker then maintains the contact in the background: adds the call to
+ *    its history (what was said stays on the call log), stamps the name, and
+ *    upserts the "Action Required" reminder task.
  *
  * Duplicate protection strategy:
  *  - Contact dedup uses a real-time SOQL exact match on the normalized E.164
@@ -78,6 +78,26 @@ let cachedPersonRecordTypeId = null;
 // Matching then falls back to the phone fields for the life of the isolate,
 // rather than every lookup failing and nothing being created.
 let externalIdDisabled = false;
+
+// Optional fields ("Lead.Care_Home__c") Salesforce reported missing or not
+// writable by the integration user, and values it refused for one
+// ('Lead.Care_Home__c="Oakhill"'). Left off every later insert for the life
+// of the isolate, so a field the org has not built, or a home the picklist
+// spells differently, costs one refused insert and one report, not one per
+// enquiry.
+const unusableFields = new Set();
+const refusedValues = new Set();
+const REFUSED_VALUES_MAX = 200;
+
+// Reports raised while a request is handled. They start at once and are kept
+// alive with ctx.waitUntil when the response goes, so a slow webhook never
+// holds up 3CX.
+const pendingReports = [];
+
+// The fallback owner, checked against Salesforce at most hourly.
+let fallbackOwnerCache = { setting: "", id: null, expiry: 0 };
+const FALLBACK_OWNER_MS = 60 * 60_000;
+const FALLBACK_OWNER_RETRY_MS = 5 * 60_000;
 
 // Negative cache for 3CX's search-as-you-type. Keyed by the query's shape and
 // the search term, valued by expiry. See isKnownEmptySearch for why this is safe.
@@ -155,6 +175,163 @@ function extraFields(env, objectType) {
 }
 
 /**
+ * The care home a record created for an enquiry is stamped with, so the org's
+ * assignment rules can route it by home. SALESFORCE_HOME_FIELD names the field
+ * (Care_Home__c at Cedar Care) and the value is the 3CX department the enquiry
+ * came through. Where the field's values differ from the department names,
+ * SALESFORCE_HOME_VALUES maps one to the other:
+ *
+ *   {"Oakhill":"Oakhill House"}
+ *
+ * A home the map does not list is sent as 3CX names it.
+ */
+function homeFields(env, home) {
+  const field = (env.SALESFORCE_HOME_FIELD || "").trim();
+  if (!field || !home) return {};
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(field)) {
+    console.error(`SALESFORCE_HOME_FIELD "${field}" is not a field name — ignoring it.`);
+    return {};
+  }
+
+  let map = null;
+  if (env.SALESFORCE_HOME_VALUES) {
+    try {
+      map = JSON.parse(env.SALESFORCE_HOME_VALUES);
+    } catch (e) {
+      console.error("SALESFORCE_HOME_VALUES is not valid JSON — sending the 3CX department names as they are:", e.message);
+    }
+  }
+  if (!map || typeof map !== "object") return { [field]: home };
+
+  const key = Object.keys(map).find(k => k.trim().toLowerCase() === home.toLowerCase());
+  return { [field]: key === undefined ? home : String(map[key]) };
+}
+
+// Fields a record is created with whatever the org's setup: its name, number,
+// opening lines and record type. Anything else (SALESFORCE_EXTRA_FIELDS, the
+// care home) helps, but a record without it is still worth having.
+const CORE_RECORD_FIELDS = new Set(["FirstName", "LastName", "Phone", "Description", "RecordTypeId"]);
+
+// Refusals about one field's name, access or value rather than the record.
+const FIELD_LEVEL_CODES = new Set([
+  "INVALID_FIELD", "INVALID_FIELD_FOR_INSERT_UPDATE", "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST",
+  "INVALID_TYPE_ON_FIELD_IN_RECORD", "STRING_TOO_LONG", "FIELD_INTEGRITY_EXCEPTION",
+  "INVALID_CROSS_REFERENCE_KEY", "MALFORMED_ID", "FIELD_FILTER_VALIDATION_EXCEPTION",
+  "FIELD_CUSTOM_VALIDATION_EXCEPTION", "JSON_PARSER_ERROR"
+]);
+// Of those, the ones that say the field itself is missing or not writable,
+// whatever value is sent.
+const FIELD_UNUSABLE_CODES = new Set(["INVALID_FIELD", "INVALID_FIELD_FOR_INSERT_UPDATE"]);
+
+/**
+ * The optional fields a refused insert names, as [{ key, unusable }].
+ *
+ * Read from Salesforce's error list entry by entry: the entry's own errorCode,
+ * and the fields it lists or its message names. Only the top-level code
+ * counts, so a trigger failing further in, whose message happens to mention
+ * the same field name, sets nothing aside. JSON_PARSER_ERROR names a value
+ * and a position rather than a field, so it sets every optional field aside.
+ */
+function refusedOptionalFields(errorText, objectType, optionalKeys) {
+  let errors;
+  try {
+    errors = JSON.parse(errorText);
+  } catch (e) {
+    return [];
+  }
+  if (!Array.isArray(errors)) return [];
+
+  const byName = new Map(optionalKeys.map(key => [key.toLowerCase(), key]));
+  const refused = new Map();
+  for (const entry of errors) {
+    const code = String((entry && entry.errorCode) || "");
+    if (!FIELD_LEVEL_CODES.has(code)) continue;
+
+    const message = String(entry.message || "");
+    const named = (Array.isArray(entry.fields) ? entry.fields : []).map(String);
+    const column = message.match(/No such column '(\w+)' on (?:sobject of type|entity) '?(\w+)'?/i);
+    if (column && column[2].toLowerCase() === objectType.toLowerCase()) named.push(column[1]);
+    const unwritable = message.match(/Unable to create\/update fields: ([\w\s,]+?)\./i);
+    if (unwritable) named.push(...unwritable[1].split(","));
+
+    const keys = code === "JSON_PARSER_ERROR" && named.length === 0
+      ? optionalKeys
+      : named.map(name => byName.get(name.trim().toLowerCase())).filter(Boolean);
+    for (const key of keys) refused.set(key, refused.get(key) || FIELD_UNUSABLE_CODES.has(code));
+  }
+  return [...refused].map(([key, unusable]) => ({ key, unusable }));
+}
+
+/** Starts a failure report now and keeps it alive past the response (see pendingReports). */
+function queueReport(env, instanceUrl, message) {
+  console.error(message);
+  pendingReports.push(reportMaintenanceFailure(env, instanceUrl, null, new Error(message)));
+}
+
+// Salesforce's own duplicate rules still apply to these inserts. This only
+// stops a rule set to "Allow" (with an alert) refusing an API insert as if it
+// were set to "Block": the Worker has already searched for the caller by
+// number, and a "Block" rule still blocks.
+const DUPLICATE_RULE_HEADERS = { "Sforce-Duplicate-Rule-Header": "allowSave=true" };
+
+/**
+ * Inserts a record. When Salesforce refuses one of the optional fields (a
+ * care home that is not in the picklist, a Lead Source value not added yet,
+ * a field the org has not built or the integration user cannot write), the
+ * insert is retried without it, so the enquiry still gets its record and is
+ * still routed, just less precisely.
+ *
+ * The refusal is reported when it happens, whatever becomes of the retry, and
+ * the field or value is left off later inserts without being reported again.
+ *
+ * Returns { response, errorText }. errorText is set, and the body already
+ * read, when the insert finally failed.
+ */
+async function insertRecord(env, instanceUrl, objectType, body) {
+  const url = `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}`;
+  const keyField = externalIdField(env);
+  const isOptional = key => !CORE_RECORD_FIELDS.has(key) && key !== keyField;
+  const valueKey = (key, value) => `${objectType}.${key}=${JSON.stringify(value)}`;
+
+  const payload = {};
+  const skipped = [];
+  for (const [key, value] of Object.entries(body)) {
+    if (isOptional(key) && (unusableFields.has(`${objectType}.${key}`) || refusedValues.has(valueKey(key, value)))) {
+      skipped.push(key);
+    } else {
+      payload[key] = value;
+    }
+  }
+  if (skipped.length > 0) {
+    console.warn(`Inserting ${objectType} without ${skipped.join(", ")}, which Salesforce refused earlier.`);
+  }
+
+  for (;;) {
+    const response = await sfFetch(env, url, { method: "POST", headers: DUPLICATE_RULE_HEADERS, body: JSON.stringify(payload) });
+    if (response.ok) return { response };
+
+    const errorText = await response.text();
+    const refused = response.status === 400
+      ? refusedOptionalFields(errorText, objectType, Object.keys(payload).filter(isOptional))
+      : [];
+    if (refused.length === 0) return { response, errorText };
+
+    for (const { key, unusable } of refused) {
+      if (unusable) {
+        unusableFields.add(`${objectType}.${key}`);
+      } else {
+        if (refusedValues.size >= REFUSED_VALUES_MAX) refusedValues.clear();
+        refusedValues.add(valueKey(key, payload[key]));
+      }
+      delete payload[key];
+    }
+    queueReport(env, instanceUrl,
+      `Salesforce refused ${refused.map(r => r.key).join(", ")} on a new ${objectType}, so it is left off this ` +
+      `and later inserts until the Worker restarts: ${errorText.slice(0, 300)}`);
+  }
+}
+
+/**
  * Finds the org's person-account record type, which every Person Account
  * insert must carry. Discovered at runtime and cached, so the same worker
  * works against any org without hardcoding an id.
@@ -175,6 +352,21 @@ async function getPersonAccountRecordTypeId(env, instanceUrl) {
 
 export default {
   async fetch(request, env, ctx) {
+    try {
+      return await requestHandler.fetch(request, env, ctx);
+    } finally {
+      // Reports raised along the way are already on their way; this keeps
+      // them alive once the response has gone.
+      if (pendingReports.length > 0) {
+        const reports = pendingReports.splice(0);
+        if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(Promise.all(reports));
+      }
+    }
+  }
+};
+
+const requestHandler = {
+  async fetch(request, env, ctx) {
     const requestUrl = new URL(request.url);
     // Repeated slashes collapse. A trailing slash on the Worker URL in 3CX
     // produces "//services/...", and a path beginning "//" is otherwise read
@@ -193,9 +385,9 @@ export default {
       // Worker would create instead of a record page that does not exist.
       if (isPendingCallerId(salesforceId)) {
         const home = { contact: "Contact", personaccount: "Account", lead: "Lead" }[orgModel(env)];
-        return Response.redirect(`${env.SALESFORCE_LOGIN_URL}/lightning/o/${home}/home`, 302);
+        return Response.redirect(`${trimmedLoginUrl(env)}/lightning/o/${home}/home`, 302);
       }
-      return Response.redirect(`${env.SALESFORCE_LOGIN_URL}/${salesforceId}`, 302);
+      return Response.redirect(`${trimmedLoginUrl(env)}/${salesforceId}`, 302);
     }
 
     // 1. Verify API Key from 3CX
@@ -207,7 +399,11 @@ export default {
     setHomeCountry(env);
 
     try {
-      // 2. Obtain Salesforce access token & instance URL (stateless client credentials flow)
+      // 2. Obtain Salesforce access token & instance URL (stateless client
+      //    credentials flow). The login URL is checked on every request, not
+      //    only when a token is fetched, so a wrong one shows up straight away
+      //    rather than when the cached token next expires.
+      salesforceLoginUrl(env);
       const { accessToken, instanceUrl } = await getSalesforceToken(env);
 
       // Set when this request is a 3CX search-as-you-type query, so the
@@ -336,7 +532,7 @@ async function getSalesforceToken(env) {
     return { accessToken: cachedToken, instanceUrl: cachedInstanceUrl };
   }
 
-  const tokenUrl = `${env.SALESFORCE_LOGIN_URL || "https://login.salesforce.com"}/services/oauth2/token`;
+  const tokenUrl = `${salesforceLoginUrl(env)}/services/oauth2/token`;
   const params = new URLSearchParams({
     grant_type: "client_credentials",
     client_id: env.SALESFORCE_CLIENT_ID,
@@ -370,6 +566,31 @@ async function getSalesforceToken(env) {
   tokenExpiry = now + 115 * 60 * 1000;
 
   return { accessToken: cachedToken, instanceUrl: cachedInstanceUrl };
+}
+
+// Salesforce addresses that look usable but do not serve the client
+// credentials flow: the generic login hosts, and the Lightning, Visualforce and
+// Experience Cloud addresses a browser shows. A denylist rather than requiring
+// ".my.salesforce.com", so government cloud and other My Domain suffixes work.
+const NOT_A_TOKEN_HOST = /^https:\/\/(?:(?:login|test)\.salesforce\.com|[^/]+\.force\.com|[^/]+\.my\.site\.com)$/i;
+
+/**
+ * The org's own My Domain address, without a trailing slash. The client
+ * credentials flow is only served there, so the addresses that are not it are
+ * refused with a message saying so rather than an OAuth error from Salesforce.
+ */
+function salesforceLoginUrl(env) {
+  const url = trimmedLoginUrl(env);
+  if (!/^https:\/\/[^/\s]+$/i.test(url) || NOT_A_TOKEN_HOST.test(url)) {
+    throw new Error("SALESFORCE_LOGIN_URL must be the org's My Domain URL, e.g. https://example.my.salesforce.com " +
+      "or https://example--uat.sandbox.my.salesforce.com. The client credentials flow is not available through " +
+      "login.salesforce.com, test.salesforce.com, or the lightning.force.com and my.site.com addresses.");
+  }
+  return url;
+}
+
+function trimmedLoginUrl(env) {
+  return String(env.SALESFORCE_LOGIN_URL || "").trim().replace(/\/+$/, "");
 }
 
 function invalidateSalesforceToken() {
@@ -1106,8 +1327,9 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
  * not be queried reliably (or the create failed), so "not found" cannot be
  * trusted and nothing is created, rather than risking a duplicate.
  *
- * `names` ({ firstName, lastName }) names a record created here; without it
- * the ring-time placeholder name is used.
+ * `names` ({ firstName, lastName, description, fields }) names a record
+ * created here and carries its care home; without it the ring-time
+ * placeholder name is used.
  */
 async function locateRecord(env, instanceUrl, phone, mayCreate, names = null) {
   const model = orgModel(env);
@@ -1293,7 +1515,8 @@ async function createPersonAccountDeduped(env, instanceUrl, phone, names = null)
     LastName: names ? names.lastName : phone,
     Phone: phone,
     Description: names ? names.description : ringTimeDescription(),
-    ...extraFields(env, "Account")
+    ...extraFields(env, "Account"),
+    ...(names && names.fields)
   }, `SELECT ${PERSON_ACCOUNT_FIELDS} FROM Account WHERE IsPersonAccount = true AND (` +
      `${identityMatchClause(env, ["Phone", "PersonMobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
 }
@@ -1307,7 +1530,8 @@ async function createLeadDeduped(env, instanceUrl, phone, names = null) {
     LastName: names ? names.lastName : phone,
     Phone: phone,
     Description: names ? names.description : ringTimeDescription(),
-    ...extraFields(env, "Lead")
+    ...extraFields(env, "Lead"),
+    ...(names && names.fields)
   }, `SELECT ${LEAD_FIELDS} FROM Lead WHERE IsConverted = false AND (` +
      `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
 }
@@ -1412,10 +1636,7 @@ async function upsertByExternalId(env, instanceUrl, objectType, field, phone, bo
   }
 
   // Genuinely absent: insert, carrying the key.
-  const created = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}`, {
-    method: "POST",
-    body: JSON.stringify({ ...body, [field]: phone })
-  });
+  const { response: created, errorText } = await insertRecord(env, instanceUrl, objectType, { ...body, [field]: phone });
 
   if (created.ok) {
     const id = (await created.json().catch(() => ({}))).id || null;
@@ -1429,13 +1650,16 @@ async function upsertByExternalId(env, instanceUrl, objectType, field, phone, bo
     // Written, but unreadable. Returning a bare id would strand the caller
     // without PersonContactId, so report failure and let the caller fall
     // back rather than hand back a half-formed record.
-    console.error(`Created ${objectType} ${id} but could not read it back.`);
+    // The usual cause is sharing: an assignment rule gave the new record to an
+    // owner whose records the integration user cannot see.
+    queueReport(env, instanceUrl,
+      `Created ${objectType} ${id} but could not read it back, so its call is logged without it. If an assignment ` +
+      `rule moves new ${objectType}s to other owners, the integration user needs View All and Modify All on ${objectType}.`);
     return null;
   }
 
   // A simultaneous call inserted first and the unique constraint refused
   // ours. That is the guarantee working: adopt the winner.
-  const errorText = await created.text();
   if (/DUPLICATE_VALUE|duplicate value found/i.test(errorText)) {
     const records = await readByKey();
     const winner = records && records[0];
@@ -1473,13 +1697,10 @@ async function createRecordDeduped(env, instanceUrl, objectType, body, convergeS
   // unusable. Salesforce excludes nulls from a unique constraint, so a
   // fallback row written without it sits outside the guarantee entirely.
   const field = externalIdField(env);
-  const response = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}`, {
-    method: "POST",
-    body: JSON.stringify(field && phone ? { ...body, [field]: phone } : body)
-  });
+  const { response, errorText } = await insertRecord(env, instanceUrl, objectType,
+    field && phone ? { ...body, [field]: phone } : body);
 
   if (!response.ok) {
-    const errorText = await response.text();
     console.error(`Failed to create Salesforce ${objectType}: ${response.status} - ${errorText.slice(0, 500)}`);
 
     // A duplicate rule that matched a record the phone lookup missed, or a
@@ -1540,7 +1761,8 @@ async function createRingTimeContact(env, instanceUrl, phone, names = null) {
     FirstName: names ? names.firstName : DEFAULT_FIRST_NAME,
     LastName: names ? names.lastName : phone,
     Phone: phone,
-    Description: names ? names.description : ringTimeDescription()
+    Description: names ? names.description : ringTimeDescription(),
+    ...(names && names.fields)
   });
 }
 
@@ -1800,8 +2022,12 @@ async function refreshHomeDirectory(env) {
  * call descriptions, and the parser reads " to " as the start of the extension.
  */
 function homeForCall(env, call, queueExtension) {
-  const home = departmentFor(env, queueExtension) || departmentFor(env, call.agent);
-  return home.replace(/\s+to\s+/gi, " ").trim().slice(0, 40);
+  return departmentName(env, call, queueExtension).replace(/\s+to\s+/gi, " ").trim().slice(0, 40);
+}
+
+/** The 3CX department a call came through, exactly as 3CX names it. */
+function departmentName(env, call, queueExtension) {
+  return (departmentFor(env, queueExtension) || departmentFor(env, call.agent)).trim();
 }
 
 /**
@@ -1811,7 +2037,8 @@ function homeForCall(env, call, queueExtension) {
  *   First name  Arbour Walk
  *   Last name   Enquiry +447700900321 (15 Sep 10:17)
  *
- * The number is E.164, exactly as stored in Phone and the External ID.
+ * The number is E.164, exactly as stored in Phone and the External ID. The
+ * home also goes into SALESFORCE_HOME_FIELD when one is set (see homeFields).
  *
  * Never a name taken from the call. isStillUnregistered recognises the last
  * name, so the reminder stays open until a person replaces it.
@@ -1822,7 +2049,8 @@ function enquiryName(env, call, queueExtension, phone) {
   return {
     firstName: home || "Phone",
     lastName: `Enquiry ${phone} (${ukDate().replace(/ \d{4}$/, "")} ${call.callTime})`,
-    description: `New enquiry${through ? ` through ${through}` : ""}\n${ukDate()} at ${call.callTime}`
+    description: `New enquiry${through ? ` through ${through}` : ""}\n${ukDate()} at ${call.callTime}`,
+    fields: homeFields(env, departmentName(env, call, queueExtension))
   };
 }
 
@@ -1865,8 +2093,8 @@ function departmentFor(env, agent) {
  * or a stale 3CX phonebook entry produces a record that looks verified but
  * isn't, and nobody re-checks a record that already has a name — whereas
  * "Unregistered Contact +447…" is self-evidently incomplete and invites
- * correction. Any name we spot travels as a hint on the description and
- * reminder instead, so a human still gets the head start.
+ * correction. Any name we spot travels as a hint on the reminder instead,
+ * so a human still gets the head start.
  */
 function resolveContactName(call, description, env) {
   // Only scan the transcription section, not the summary/sentiment blocks
@@ -2137,9 +2365,9 @@ async function reportMaintenanceFailure(env, instanceUrl, whoId, error, ownerId 
       `AND Subject = '${FAILURE_SUBJECT.replace(/'/g, "\\'")}' LIMIT 1`);
 
     const guidance =
-      `The call log itself was saved. What may be missing from the record is the ` +
-      `appended transcription, the caller reminder, or both. Check the call activity ` +
-      `for this number and copy anything missing across by hand.`;
+      `The call log itself was saved, with what was said on it. What may be missing is ` +
+      `this call in the record's call history, the caller reminder, or both. Check the ` +
+      `call activity for this number and follow it up by hand.`;
 
     // A repeat failure is added to the open alert rather than replacing it,
     // so every affected call can still be traced.
@@ -2163,10 +2391,7 @@ async function reportMaintenanceFailure(env, instanceUrl, whoId, error, ownerId 
     // With the person who took the call, not the integration user nobody reads.
     if (ownerId) alert.OwnerId = ownerId;
 
-    const raised = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/Task`, {
-      method: "POST",
-      body: JSON.stringify(alert)
-    });
+    const raised = await insertTask(env, instanceUrl, alert);
 
     // During a full Salesforce outage this attempt fails too. Say so, so the
     // logs don't imply an alert is waiting for someone when none exists.
@@ -2177,6 +2402,95 @@ async function reportMaintenanceFailure(env, instanceUrl, whoId, error, ownerId 
   } catch (e) {
     console.error("Could not raise a Salesforce alert for the failure:", e.message);
   }
+}
+
+/**
+ * Who owns a call log, and the reminder or error alert that follows it, when
+ * 3CX found no active Salesforce user with the answering extension's email.
+ * Left alone they belong to the integration user, where they appear in nobody's
+ * task list.
+ *
+ * SALESFORCE_FALLBACK_OWNER is a User Id or username, or a queue Id or API
+ * name for a queue that supports Tasks. It is checked against Salesforce at
+ * most hourly, so an owner who is deactivated, or a queue that stops taking
+ * Tasks, is set aside rather than failing every call log.
+ */
+async function fallbackOwnerId(env, instanceUrl) {
+  const setting = String(env.SALESFORCE_FALLBACK_OWNER || "").trim();
+  if (!setting) return null;
+  const now = Date.now();
+  if (fallbackOwnerCache.setting === setting && now < fallbackOwnerCache.expiry) return fallbackOwnerCache.id;
+
+  // A Standard user: an active Chatter Free or portal user cannot own Tasks.
+  let soql = null;
+  if (/^005[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/.test(setting)) {
+    soql = `SELECT Id FROM User WHERE Id = '${setting}' AND IsActive = true AND UserType = 'Standard' LIMIT 1`;
+  } else if (/^00G[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/.test(setting)) {
+    soql = `SELECT QueueId FROM QueueSobject WHERE QueueId = '${setting}' AND SobjectType = 'Task' LIMIT 1`;
+  } else if (/^[^\s'\\@]+@[^\s'\\@]+$/.test(setting)) {
+    soql = `SELECT Id FROM User WHERE Username = '${setting}' AND IsActive = true AND UserType = 'Standard' LIMIT 1`;
+  } else if (/^[A-Za-z][A-Za-z0-9_]*$/.test(setting)) {
+    soql = `SELECT QueueId FROM QueueSobject WHERE Queue.DeveloperName = '${setting}' AND SobjectType = 'Task' LIMIT 1`;
+  }
+
+  if (!soql) {
+    console.error("SALESFORCE_FALLBACK_OWNER must be a User Id, a username, or a queue Id or API name. Ignoring it.");
+    fallbackOwnerCache = { setting, id: null, expiry: now + FALLBACK_OWNER_MS };
+    return null;
+  }
+
+  const records = await sfQuery(env, instanceUrl, soql);
+  if (records === null) {
+    // Not refused, just unknown for now. Keep whatever was last confirmed.
+    const known = fallbackOwnerCache.setting === setting ? fallbackOwnerCache.id : null;
+    fallbackOwnerCache = { setting, id: known, expiry: now + FALLBACK_OWNER_RETRY_MS };
+    return known;
+  }
+
+  const id = records[0] ? (records[0].Id || records[0].QueueId) : null;
+  if (!id) {
+    console.error(`SALESFORCE_FALLBACK_OWNER "${setting}" is not an active user or a queue that takes Tasks, ` +
+      `so call logs with no matching user stay with the integration user.`);
+  }
+  fallbackOwnerCache = { setting, id, expiry: now + FALLBACK_OWNER_MS };
+  return id;
+}
+
+/**
+ * Sets aside a fallback owner Salesforce refused on a Task, for as long as a
+ * confirmed one is trusted. Its check can pass while the insert still fails
+ * (a Task validation rule on the owner, say), and re-checking would only
+ * repeat the refusal on every call.
+ */
+function setAsideFallbackOwner(env, instanceUrl, refusedId, reason) {
+  if (!refusedId || fallbackOwnerCache.id !== refusedId) return;
+  fallbackOwnerCache = { ...fallbackOwnerCache, id: null, expiry: Date.now() + FALLBACK_OWNER_MS };
+  queueReport(env, instanceUrl,
+    `Salesforce refused SALESFORCE_FALLBACK_OWNER ${refusedId} as a Task owner, so it is set aside for an hour: ${reason.slice(0, 300)}`);
+}
+
+/** True when Salesforce refused a Task insert because of its owner. */
+function isOwnerRefusal(status, errorText) {
+  return status === 400 && /OwnerId|INACTIVE_OWNER_OR_USER/.test(errorText);
+}
+
+/**
+ * Inserts a reminder or error alert. An owner Salesforce will not take (one
+ * deactivated since, a licence that cannot own Tasks) costs the owner, not
+ * the Task: it is saved again with the integration user.
+ */
+async function insertTask(env, instanceUrl, body) {
+  const url = `${instanceUrl}${SF_API_PATH}/sobjects/Task`;
+  const response = await sfFetch(env, url, { method: "POST", body: JSON.stringify(body) });
+  if (response.ok || !body.OwnerId) return response;
+
+  const errorText = await response.clone().text();
+  if (!isOwnerRefusal(response.status, errorText)) return response;
+
+  console.error(`Salesforce refused owner ${body.OwnerId} on a Task, so it is saved with the integration user: ${errorText.slice(0, 300)}`);
+  setAsideFallbackOwner(env, instanceUrl, body.OwnerId, errorText);
+  const { OwnerId, ...withoutOwner } = body;
+  return sfFetch(env, url, { method: "POST", body: JSON.stringify(withoutOwner) });
 }
 
 // Bounds how many reminders one call closes, so a record carrying a pile of
@@ -2206,10 +2520,19 @@ async function closeOpenReminders(env, instanceUrl, contactId) {
 // lines. Only that section is ever rewritten, so anything a person types
 // elsewhere in the Description stays as they left it, and when the field
 // fills up the oldest calls are dropped rather than their notes.
+//
+// The history says when, which way, how long, who took the call and where the
+// recording is. What was said (transcript, summary, sentiment) and any name
+// heard on the call stay on the call log, a Task. An org that deletes call
+// logs after a retention period then deletes the words with them, instead of
+// a copy living on in the record for as long as the record does.
 
 const HISTORY_START = "--- 3CX call history, newest first ---";
 const HISTORY_END = "--- end of call history ---";
 const HISTORY_HEADLINE = /^\d{1,2} [A-Z][a-z]{2} \d{4} \d{1,2}:\d{2} · /;
+// The one content line an entry keeps: "Recording: …", or
+// "Recording (ext 102): …" once a transferred call has two.
+const HISTORY_RECORDING = /^Recording(?: \([^)]*\))?: \S+$/;
 
 /** "00:09:42", "9:42" or "1:02:03" as seconds, or null when there is no duration. */
 function durationSeconds(text) {
@@ -2233,14 +2556,14 @@ function directionLabel(direction) {
 
 /**
  * One leg of a call, ready to start a history entry or join the latest one:
- * where it went, how long it took, and what was said.
+ * where it went, how long it took, and its recording link.
  *
  * 3CX's raw line is deliberately not used. It repeats the number and then the
  * matched record's display name, so a caller's own name would be nested in
  * their own history. Everything worth keeping is parsed out instead, and
  * empty sections are dropped.
  */
-function callLeg(env, routing, call, description, hintLine) {
+function callLeg(env, routing, call, description) {
   const home = departmentFor(env, call.agent);
   const known = Boolean(call.agent) && call.agent !== "Unknown";
   const kind = matchesExtension(routing.queues, call.agent) ? "queue"
@@ -2255,12 +2578,9 @@ function callLeg(env, routing, call, description, hintLine) {
   }[call.direction] || "Handled by";
 
   const seconds = durationSeconds(call.duration);
-  const sections = splitCallSections(description);
-  const content = [];
-  if (sections.transcription) content.push(["Transcript", sections.transcription]);
-  if (sections.summary) content.push(["Summary", sections.summary]);
-  if (sections.sentiment) content.push(["Sentiment", sections.sentiment]);
-  if (sections.recording) content.push(["Recording", sections.recording]);
+  // A link is one line. Anything longer under the heading is not a link.
+  const recording = splitCallSections(description).recording;
+  const content = /^\S+$/.test(recording) ? [["Recording", recording]] : [];
 
   return {
     home,
@@ -2269,22 +2589,20 @@ function callLeg(env, routing, call, description, hintLine) {
     headline: `${ukDate()} ${call.callTime} · ${directionLabel(call.direction)}` +
       (seconds !== null ? ` · ${formatDuration(seconds)}` : ""),
     route: kind === "person" && known ? `${verb} ${short}${home ? `, ${home}` : ""}` : short,
-    hintLine,
     content
   };
 }
 
 function entryLines(leg) {
   const lines = [leg.headline, leg.route];
-  if (leg.hintLine) lines.push(leg.hintLine);
   for (const [label, text] of leg.content) lines.push(`${label}: ${text}`);
   return lines;
 }
 
 /**
  * Folds a transferred leg into the latest entry: the durations add up, the
- * route gains ", then …", and anything said is added, labelled with the
- * extension once the entry already holds another leg's content.
+ * route gains ", then …", and the recording link is added, labelled with the
+ * extension once the entry already holds another leg's.
  */
 function joinLeg(lines, leg) {
   const segments = lines[0].split(" · ");
@@ -2300,18 +2618,18 @@ function joinLeg(lines, leg) {
   lines[1] = route;
 
   const hasContent = lines.length > 2;
-  if (leg.hintLine) lines.push(leg.hintLine);
   for (const [label, text] of leg.content) {
     lines.push(hasContent ? `${label} (${leg.short}): ${text}` : `${label}: ${text}`);
   }
 }
 
 /**
- * The record's Description with this leg written into its call history.
- * A leg merged into the latest call log joins the latest entry, provided that
- * entry is from today; anything else starts a new entry at the top.
+ * A Description split around its call history: the text before and after
+ * the marker lines, and the entries between them, each cut back to what the
+ * history keeps. `trimmed` says whether anything had to be cut, which only
+ * happens to entries written while the history still held what was said.
  */
-function writeCallHistory(existing, leg, continuation) {
+function readCallHistory(existing) {
   const text = String(existing || "");
   const start = text.indexOf(HISTORY_START);
   const end = start === -1 ? -1 : text.indexOf(HISTORY_END, start);
@@ -2331,21 +2649,27 @@ function writeCallHistory(existing, leg, continuation) {
     after = text.trim() ? `\n\n${text}` : "";
   }
 
+  // Line endings are evened out first: a Description saved through a tool
+  // that writes CRLF would otherwise fail every line test below.
   const entries = [];
-  for (const line of body.split("\n")) {
+  for (const line of body.replace(/\r\n?/g, "\n").split("\n")) {
     if (HISTORY_HEADLINE.test(line)) entries.push([line]);
     else if (entries.length > 0) entries[entries.length - 1].push(line);
   }
-  for (const entry of entries) {
-    while (entry.length > 1 && !entry[entry.length - 1].trim()) entry.pop();
+
+  let trimmed = false;
+  for (const [i, entry] of entries.entries()) {
+    const kept = entry.filter((line, n) => n < 2 || HISTORY_RECORDING.test(line));
+    while (kept.length > 1 && !kept[kept.length - 1].trim()) kept.pop();
+    if (entry.some((line, n) => n >= 2 && line.trim() && !HISTORY_RECORDING.test(line))) trimmed = true;
+    entries[i] = kept;
   }
 
-  if (continuation && entries.length > 0 && entries[0][0].startsWith(`${ukDate()} `)) {
-    joinLeg(entries[0], leg);
-  } else {
-    entries.unshift(entryLines(leg));
-  }
+  return { found: start !== -1 && end !== -1, before, after, entries, trimmed };
+}
 
+/** The Description rebuilt from readCallHistory's parts, dropping the oldest calls to fit. */
+function buildCallHistory({ before, after, entries }) {
   const build = () =>
     `${before}${HISTORY_START}\n\n${entries.map(e => e.join("\n")).join("\n\n")}\n\n${HISTORY_END}${after}`;
   let result = build();
@@ -2356,8 +2680,37 @@ function writeCallHistory(existing, leg, continuation) {
   return result.length > SF_TEXT_LIMIT ? truncateForSalesforce(result) : result;
 }
 
-async function appendCallToRecord(env, routing, instanceUrl, objectType, record, call, description, hintLine, continuation = false) {
-  const leg = callLeg(env, routing, call, description, hintLine);
+/**
+ * The record's Description with this leg written into its call history.
+ * A leg merged into the latest call log joins the latest entry, provided that
+ * entry is from today; anything else starts a new entry at the top.
+ */
+function writeCallHistory(existing, leg, continuation) {
+  const history = readCallHistory(existing);
+  const { entries } = history;
+
+  if (continuation && entries.length > 0 && entries[0][0].startsWith(`${ukDate()} `)) {
+    joinLeg(entries[0], leg);
+  } else {
+    entries.unshift(entryLines(leg));
+  }
+  return buildCallHistory(history);
+}
+
+/**
+ * The Description with its call history cut back to headline, route and
+ * recording, or null when there was nothing to cut. Applied to a record
+ * someone has already named, which no longer gets new entries, so a
+ * transcript written into its history by an earlier version does not stay on
+ * it for as long as the record exists.
+ */
+function trimmedCallHistory(existing) {
+  const history = readCallHistory(existing);
+  return history.found && history.trimmed ? buildCallHistory(history) : null;
+}
+
+async function appendCallToRecord(env, routing, instanceUrl, objectType, record, call, description, continuation = false) {
+  const leg = callLeg(env, routing, call, description);
   await sfWrite(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}/${record.Id}`, {
     method: "PATCH",
     body: JSON.stringify({ Description: writeCallHistory(record.Description, leg, continuation) })
@@ -2375,8 +2728,8 @@ function recordPhone(record) {
  * normal path now that records are created at ring time). Runs via
  * ctx.waitUntil so 3CX isn't kept waiting.
  *  - Registered caller  → auto-complete leftover reminder tasks.
- *  - Still unregistered → upgrade the name if the caller introduced
- *    themselves, append the call to the record, and upsert the open reminder
+ *  - Still unregistered → stamp the name, add the call to the record's
+ *    history, and upsert the open reminder (which carries any name heard)
  *    instead of stacking a new one.
  *
  * `whoId` is what the task was linked to (a Lead, or a Person Account's
@@ -2393,6 +2746,13 @@ async function maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBod
     if (!isStillUnregistered(record)) {
       console.log(`${objectType} ${record.Id} already has real details — closing any open reminders.`);
       await closeOpenReminders(env, instanceUrl, whoId);
+      const trimmed = trimmedCallHistory(record.Description);
+      if (trimmed !== null) {
+        await sfWrite(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}/${record.Id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ Description: trimmed })
+        });
+      }
       return;
     }
 
@@ -2435,7 +2795,7 @@ async function maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBod
       }));
     }
 
-    await attempt(() => appendCallToRecord(env, routing, instanceUrl, objectType, record, call, description, nameInfo.hintLine, continuation));
+    await attempt(() => appendCallToRecord(env, routing, instanceUrl, objectType, record, call, description, continuation));
     await attempt(() => upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, taskBody.OwnerId, routing, continuation));
 
     if (failures.length > 0) throw new Error(failures.join("; "));
@@ -2533,10 +2893,10 @@ async function upsertAlertTask(env, instanceUrl, whoId, record, objectType, call
     alertBody.OwnerId = ownerId;
   }
 
-  const created = await sfWrite(env, `${instanceUrl}${SF_API_PATH}/sobjects/task`, {
-    method: "POST",
-    body: JSON.stringify(alertBody)
-  });
+  const created = await insertTask(env, instanceUrl, alertBody);
+  if (!created.ok) {
+    throw new Error(`POST /sobjects/Task failed (${created.status}): ${(await created.text()).slice(0, 300)}`);
+  }
 
   const alertId = (await created.json()).id;
 
@@ -2582,7 +2942,11 @@ async function applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate) {
   }
 
   if (failed && gate.viaQueue) {
-    return { reason: "Salesforce failed on a tracked call, logging it unlinked" };
+    return {
+      reason: "Salesforce failed on a tracked call, logging it unlinked",
+      alert: `An enquiry from ${maskPhone(phone)} through queue ${gate.queue || call.agent} at ${call.callTime} could not be ` +
+        `given a Salesforce record, so its call log was saved without one. The Worker logs give Salesforce's reason.`
+    };
   }
   return {
     drop: true,
@@ -2621,7 +2985,7 @@ async function keepExistingRecordCall(env, instanceUrl, taskBody, gate, what) {
  * 3CX journals against the id the lookup returned: a real record, or with
  * Tracked Queues set, a stand-in for an unknown caller that is resolved here
  * (see applyTrackedQueueGate). The task is forwarded and record maintenance
- * (transcription append, reminder upsert) runs in the background.
+ * (call history, reminder upsert) runs in the background.
  */
 async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   const requestBodyText = await request.text();
@@ -2695,9 +3059,12 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   // record for an unknown caller now that the queue is known. Runs after
   // redaction so nothing withheld can reach a record it creates.
   const gate = trackedQueueGate(request.headers, call);
+  let enquiryAlert = null;
   if (gate.active) {
     const decision = await applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate);
     console.log(`Tracked queues (queue ${gate.queue || "none"}, extension ${call.agent}): ${decision.reason}`);
+    // Sent once the call log is saved, since the alert says it was.
+    enquiryAlert = decision.alert || null;
     if (decision.drop) {
       return jsonResponse({ success: true, errors: [], filtered: "queue" }, 201);
     }
@@ -2707,6 +3074,18 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
     // rather than letting the insert fail.
     console.warn("Task arrived with a stand-in id and no Tracked Queues header; forwarding the call log unlinked.");
     delete taskBody.WhoId;
+  }
+
+  // The owner 3CX found from the agent's email, or the fallback owner when it
+  // found nobody. The reminder and any error alert follow the call log's owner.
+  let ownerIsFallback = false;
+  if (!String(taskBody.OwnerId || "").trim()) {
+    delete taskBody.OwnerId;
+    const fallback = await fallbackOwnerId(env, instanceUrl);
+    if (fallback) {
+      taskBody.OwnerId = fallback;
+      ownerIsFallback = true;
+    }
   }
 
   {
@@ -2735,10 +3114,42 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
 
     // Otherwise forward first so journaling is never delayed, then run
     // maintenance when the task targets a Contact or Lead.
-    const response = await forwardTask();
+    let response = await forwardTask();
+
+    // An owner Salesforce will not take must not cost the call log. 3CX's
+    // user can be one whose licence cannot own Tasks, and a fallback owner can
+    // be refused since it was checked. The fallback is tried in place of 3CX's
+    // user, then the call log goes to the integration user. The reminder and
+    // any alert follow whichever owner the call log ends up with.
+    for (let tries = 0; tries < 2 && taskBody.OwnerId && response.status === 400; tries++) {
+      const ownerError = await response.clone().text();
+      if (!isOwnerRefusal(response.status, ownerError)) break;
+
+      const refused = taskBody.OwnerId;
+      let next = null;
+      if (ownerIsFallback) {
+        setAsideFallbackOwner(env, instanceUrl, refused, ownerError);
+      } else {
+        next = await fallbackOwnerId(env, instanceUrl);
+      }
+      if (next && next !== refused) {
+        taskBody.OwnerId = next;
+        ownerIsFallback = true;
+      } else {
+        delete taskBody.OwnerId;
+        ownerIsFallback = false;
+      }
+      console.error(`Salesforce refused owner ${refused} on the call log, so it goes to ` +
+        `${taskBody.OwnerId || "the integration user"}: ${ownerError.slice(0, 300)}`);
+      response = await forwardTask();
+    }
+
     if (response.ok) {
       if (isPersonRecord) {
         ctx.waitUntil(maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBody, headerAgent));
+      }
+      if (enquiryAlert) {
+        ctx.waitUntil(reportMaintenanceFailure(env, instanceUrl, null, new Error(enquiryAlert)));
       }
       return response;
     }
