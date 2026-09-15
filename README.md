@@ -70,22 +70,45 @@ The number is canonicalised to E.164 (`07700900123` → `+447700900123`) so look
 
 3CX posts the call log (time, direction, extension, duration, **transcription, summary, sentiment, recording link**) as a Task linked to that record. The Worker forwards it immediately, then in the background:
 
-- **Appends** the call and transcript to the record's Description
-- **Stamps the first call's** direction/time/extension onto the name, e.g. `+447700900456 (Inbound 15:04, Ext 102)`
-- **Notes any name it heard** as an explicitly unverified hint on the record and the reminder — it is **never** written into the name field (see below)
-- **Upserts one open reminder task** — "Action Required: …" — asking a human to fill in the details
+- **Adds the call to the record's call history**, newest first, in the Description
+- **Notes any name it heard** as an explicitly unverified hint on the record and the reminder. It is **never** written into the name field (see below)
+- **Upserts one open reminder task**, "Action Required: …", asking a human to fill in the details and listing the calls, newest first
 
-> **Names are never guessed onto records.** A mis-heard transcription or a stale 3CX phonebook entry produces a record that *looks* verified but isn't, and nobody re-checks a record that already has a name. `Unregistered Contact +447700900456` is self-evidently incomplete and invites correction. Any name detected appears as `Possible caller name mentioned: "…" (unverified — from call transcription)` so a human still gets the head start.
+The Description of a new enquiry reads:
+
+```
+New enquiry through Oakhill (queue 8075)
+15 Sep 2026 at 12:27
+
+--- 3CX call history, newest first ---
+
+15 Sep 2026 13:08 · Inbound · 0:25
+Answered by ext 0374, Oakhill
+Recording: https://cedarcare.my3cx.uk/recording/…
+
+15 Sep 2026 12:27 · Inbound · 3:06
+Oakhill menu 2017 (0:56), then ext 0375 (2:10)
+Transcript: Hello, I'm calling about a room for my mum.
+Summary: Caller asked about availability for her mother.
+Sentiment: Positive
+Recording: https://cedarcare.my3cx.uk/recording/…
+
+--- end of call history ---
+```
+
+Only the section between the two marker lines is ever rewritten, so notes a person types above or below it are left alone. Empty transcript, summary and sentiment lines are left out. When the Description reaches Salesforce's limit, the oldest calls are dropped first, never the notes. A record written before this format keeps its old text underneath the new history.
+
+> **Names are never guessed onto records.** A mis-heard transcription or a stale 3CX phonebook entry produces a record that *looks* verified but isn't, and nobody re-checks a record that already has a name. `Unregistered Contact +447700900456` is self-evidently incomplete and invites correction. Any name detected appears as `Possible caller name mentioned: "…" (unverified, from call transcription)` so a human still gets the head start.
 
 ### 2a. The call is transferred
 
-3CX journals **per extension, not per call**, so a call answered on reception and passed to a manager arrives as two separate call logs. When a log arrives for a caller who already has one from the last few minutes, the Worker **appends to that record** instead of creating a second, heading each leg:
+3CX journals **per extension, not per call**, so a call that passes a receptionist menu and is answered, or is answered on reception and passed to a manager, arrives as several call logs. When a log arrives for a caller who already has one from the last few minutes, the Worker **adds it to that call log** instead of creating a second:
 
 ```
-===== Call continued on extension 105 at 15:04 (UK Time) =====
+Then ext 105, Arbour Walk at 15:04, 1:12
 ```
 
-Durations are summed so the total reflects the whole conversation. 3CX exposes **no call identifier** to CRM templates, so legs are correlated by caller plus timing — deliberately biased toward merging, because a wrongly merged pair still shows both legs clearly in one record while a wrongly split one scatters the history.
+The record's call history does the same: the legs become one entry, `Oakhill menu 2017 (0:56), then ext 0375 (2:10)`, and the reminder lists the call once. Durations are summed so the total reflects the whole conversation. 3CX exposes **no call identifier** to CRM templates, so legs are correlated by caller plus timing — deliberately biased toward merging, because a wrongly merged pair still shows both legs clearly in one record while a wrongly split one scatters the history.
 
 Since a leg is journaled when it *ends*, the window is measured from the handover, not the conversation: the incoming leg's own duration is added, so a long second leg still merges. Set `CALL_MERGE_WINDOW_MINUTES` to `0` to log every leg separately.
 
@@ -341,7 +364,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                           # 341 checks — no network, no credentials needed
+npm test                           # 359 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions

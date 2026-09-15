@@ -472,7 +472,8 @@ Make one inbound and one outbound test call after enabling it and check whether 
 Auto attendants and queue legs are menu prompts and hold music. There is nothing said to transcribe and the audio is worthless, so leave recording off for those extensions. The **time** spent there is still captured: 3CX reports the duration on the call journal regardless, and the Salesforce integration renders a routing leg as a single line rather than an empty call block:
 
 ```
-Routed via extension 1001 at 12:21, held 04:35.
+15 Sep 2026 12:21 · Inbound · 5:45
+Oakhill menu 2017 (4:35), then ext 0375 (1:10)
 ```
 
 List the receptionist and ring group extensions under **Receptionist Extensions** in the CRM template so they are treated as routing rather than as callers. Tracked queues count automatically.

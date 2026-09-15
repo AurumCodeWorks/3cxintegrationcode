@@ -651,6 +651,21 @@ function truncateCallLog(text) {
   return `${safeSlice(text, 0, SF_TEXT_LIMIT - 60)}\n...[transcript truncated to fit Salesforce]`;
 }
 
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Today in the UK, e.g. "15 Sep 2026". Months are spelt out here: runtimes disagree on "Sep" and "Sept". */
+function ukDate() {
+  const [dd, mm, yyyy] = new Date()
+    .toLocaleDateString("en-GB", { timeZone: "Europe/London", day: "numeric", month: "numeric", year: "numeric" })
+    .split("/");
+  return `${Number(dd)} ${MONTH_NAMES[Number(mm) - 1]} ${yyyy}`;
+}
+
+/** The time in the UK, e.g. "10:32". */
+function ukTime() {
+  return new Date().toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
 /** Date in the UK, as Salesforce's YYYY-MM-DD, so an after-midnight reminder is not due yesterday. */
 function ukToday() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
@@ -1277,7 +1292,7 @@ async function createPersonAccountDeduped(env, instanceUrl, phone, names = null)
     FirstName: names ? names.firstName : DEFAULT_FIRST_NAME,
     LastName: names ? names.lastName : phone,
     Phone: phone,
-    Description: ringTimeDescription(),
+    Description: names ? names.description : ringTimeDescription(),
     ...extraFields(env, "Account")
   }, `SELECT ${PERSON_ACCOUNT_FIELDS} FROM Account WHERE IsPersonAccount = true AND (` +
      `${identityMatchClause(env, ["Phone", "PersonMobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
@@ -1291,16 +1306,15 @@ async function createLeadDeduped(env, instanceUrl, phone, names = null) {
     FirstName: names ? names.firstName : DEFAULT_FIRST_NAME,
     LastName: names ? names.lastName : phone,
     Phone: phone,
-    Description: ringTimeDescription(),
+    Description: names ? names.description : ringTimeDescription(),
     ...extraFields(env, "Lead")
   }, `SELECT ${LEAD_FIELDS} FROM Lead WHERE IsConverted = false AND (` +
      `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
 }
 
+/** Opening lines of a record created when the phone rang (templates older than v46). */
 function ringTimeDescription() {
-  const stamp = new Date().toLocaleString("en-GB", { timeZone: "Europe/London" });
-  return `Auto-created from the 3CX phone system when this number called at ${stamp} (UK Time).\n` +
-         `Call details and the transcription are appended when the call completes.`;
+  return `Created when this number rang\n${ukDate()} at ${ukTime()}`;
 }
 
 /**
@@ -1526,7 +1540,7 @@ async function createRingTimeContact(env, instanceUrl, phone, names = null) {
     FirstName: names ? names.firstName : DEFAULT_FIRST_NAME,
     LastName: names ? names.lastName : phone,
     Phone: phone,
-    Description: ringTimeDescription()
+    Description: names ? names.description : ringTimeDescription()
   });
 }
 
@@ -1675,8 +1689,17 @@ function matchesExtension(list, agent) {
       : agent === entry);
 }
 
-function isRoutingExtension(list, agent) {
-  return matchesExtension(list, agent);
+function isRoutingExtension(routing, agent) {
+  return matchesExtension([...routing.queues, ...routing.menus], agent);
+}
+
+/** Tracked queues and receptionist menus, kept apart so a call's history can name each. */
+function routingLists(headers) {
+  const read = (name) => (headers && headers.get ? headers.get(name) || "" : "");
+  return {
+    queues: read("X-Tracked-Queues").split(",").map(v => v.trim()).filter(Boolean),
+    menus: read("X-Receptionist-Extensions").split(",").map(v => v.trim()).filter(Boolean)
+  };
 }
 
 /**
@@ -1794,12 +1817,12 @@ function homeForCall(env, call, queueExtension) {
  * name, so the reminder stays open until a person replaces it.
  */
 function enquiryName(env, call, queueExtension, phone) {
-  // Months spelt out here: runtimes disagree on "Sep" and "Sept".
-  const [dd, mm] = new Date().toLocaleDateString("en-GB", { timeZone: "Europe/London", day: "numeric", month: "numeric" }).split("/");
-  const day = `${Number(dd)} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(mm) - 1]}`;
+  const home = homeForCall(env, call, queueExtension);
+  const through = queueExtension ? (home ? `${home} (queue ${queueExtension})` : `queue ${queueExtension}`) : home;
   return {
-    firstName: homeForCall(env, call, queueExtension) || "Phone",
-    lastName: `Enquiry ${phone} (${day} ${call.callTime})`
+    firstName: home || "Phone",
+    lastName: `Enquiry ${phone} (${ukDate().replace(/ \d{4}$/, "")} ${call.callTime})`,
+    description: `New enquiry${through ? ` through ${through}` : ""}\n${ukDate()} at ${call.callTime}`
   };
 }
 
@@ -1869,7 +1892,7 @@ function resolveContactName(call, description, env) {
     lastName: `${call.phone} (${directionTag})`,
     hintName,
     hintSource,
-    hintLine: hintName ? `Possible caller name mentioned: "${hintName}" (unverified — from ${hintSource})` : null
+    hintLine: hintName ? `Possible caller name mentioned: "${hintName}" (unverified, from ${hintSource})` : null
   };
 }
 
@@ -2049,13 +2072,13 @@ async function mergeIntoRecentCallTask(env, instanceUrl, whoId, taskBody, call) 
   const prior = await findRecentCallTask(env, instanceUrl, whoId, windowMinutes, legSeconds);
   if (!prior) return null;
 
-  const legHeader = call.agent && call.agent !== "Unknown"
-    ? `Call continued on extension ${call.agent} at ${call.callTime} (UK Time)`
-    : `Call continued at ${call.callTime} (UK Time)`;
+  const home = departmentFor(env, call.agent);
+  const who = call.agent && call.agent !== "Unknown" ? `ext ${call.agent}${home ? `, ${home}` : ""}` : "another extension";
+  const legDuration = formatDuration(durationSeconds(call.duration));
 
   const update = {
     Description: truncateForSalesforce(
-      `${prior.Description || ""}\n\n===== ${legHeader} =====\n${taskBody.Description || ""}`),
+      `${prior.Description || ""}\n\nThen ${who} at ${call.callTime}${legDuration ? `, ${legDuration}` : ""}\n${taskBody.Description || ""}`),
     CallDurationInSeconds:
       Number(prior.CallDurationInSeconds || 0) + Number(taskBody.CallDurationInSeconds || 0)
   };
@@ -2178,63 +2201,166 @@ async function closeOpenReminders(env, instanceUrl, contactId) {
   }
 }
 
-/**
- * Appends this call (with its transcription) to the caller's record so the
- * full history lives there as well as in its linked tasks.
- */
-/**
- * Renders one call as a readable block for the record's Description.
- *
- * 3CX's raw line is deliberately not pasted in. It repeats the number, then
- * repeats the matched record's *display name* — which itself contains the
- * number and the direction stamp — so an auto-created caller ends up with
- * their own name nested inside their own call history, twice. It also emits
- * "Transcription:", "Summary:", "Sentiment:" and "Recording:" whether or not
- * any of them have content, which on a call with no transcript is four empty
- * headings and nothing else.
- *
- * Everything worth keeping is already parsed, so the block is composed from
- * that instead and empty sections are dropped.
- */
-function renderCallBlock(env, routingExts, call, description, hintLine) {
-  const site = departmentFor(env, call.agent);
-  const sections = splitCallSections(description);
-  const body = [];
-  if (hintLine) body.push(hintLine);
-  if (sections.transcription) body.push(`Transcription: ${sections.transcription}`);
-  if (sections.summary) body.push(`Summary: ${sections.summary}`);
-  if (sections.sentiment) body.push(`Sentiment: ${sections.sentiment}`);
-  if (sections.recording) body.push(`Recording: ${sections.recording}`);
+// ── Record call history ──────────────────────────────────────────────────
+// A record's Description carries its calls, newest first, between two marker
+// lines. Only that section is ever rewritten, so anything a person types
+// elsewhere in the Description stays as they left it, and when the field
+// fills up the oldest calls are dropped rather than their notes.
 
-  // A leg that ended on an auto attendant or in a queue is routing, not a
-  // conversation. Given a full block it dominates the history: a caller held
-  // for half an hour contributes a long duration and nothing said, burying
-  // the leg where somebody actually spoke. One line instead, because the
-  // wait itself is worth knowing even though nothing was discussed.
-  if (isRoutingExtension(routingExts, call.agent) && body.length === 0) {
-    const label = site ? `${site} (${call.agent})` : `extension ${call.agent}`;
-    return `\n\nRouted via ${label} at ${call.callTime}` +
-           (call.duration ? `, held ${call.duration}` : "") + ".";
-  }
+const HISTORY_START = "--- 3CX call history, newest first ---";
+const HISTORY_END = "--- end of call history ---";
+const HISTORY_HEADLINE = /^\d{1,2} [A-Z][a-z]{2} \d{4} \d{1,2}:\d{2} · /;
 
-  const who = isRoutingExtension(routingExts, call.agent)
-    ? (site ? `${site} (${call.agent})` : `Extension ${call.agent}`)
-    : (site ? `Ext ${call.agent} (${site})` : `Ext ${call.agent}`);
-  const parts = [call.direction, call.callTime, who];
-  if (call.duration) parts.push(call.duration);
-
-  if (body.length === 0) body.push("No transcription or recording available for this call.");
-
-  return `\n\n===== ${parts.join(" · ")} =====\n${body.join("\n\n")}`;
+/** "00:09:42", "9:42" or "1:02:03" as seconds, or null when there is no duration. */
+function durationSeconds(text) {
+  const parts = String(text || "").trim().split(":");
+  if (parts.length < 2 || parts.some(p => !/^\d+$/.test(p))) return null;
+  return parts.reduce((total, p) => total * 60 + Number(p), 0);
 }
 
-async function appendCallToRecord(env, routingExts, instanceUrl, objectType, record, call, description, hintLine) {
-  const appendix = renderCallBlock(env, routingExts, call, description, hintLine);
+/** Seconds as "9:42", or "1:02:03" once past the hour. */
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined) return "";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = String(seconds % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
+
+function directionLabel(direction) {
+  return { "Inbound Missed": "Missed", "Outbound Unanswered": "Unanswered outbound" }[direction] || direction || "Call";
+}
+
+/**
+ * One leg of a call, ready to start a history entry or join the latest one:
+ * where it went, how long it took, and what was said.
+ *
+ * 3CX's raw line is deliberately not used. It repeats the number and then the
+ * matched record's display name, so a caller's own name would be nested in
+ * their own history. Everything worth keeping is parsed out instead, and
+ * empty sections are dropped.
+ */
+function callLeg(env, routing, call, description, hintLine) {
+  const home = departmentFor(env, call.agent);
+  const known = Boolean(call.agent) && call.agent !== "Unknown";
+  const kind = matchesExtension(routing.queues, call.agent) ? "queue"
+    : matchesExtension(routing.menus, call.agent) ? "menu" : "person";
+
+  const short = !known ? "3CX"
+    : kind === "person" ? `ext ${call.agent}`
+    : `${home ? `${home} ` : ""}${kind} ${call.agent}`;
+
+  const verb = {
+    Inbound: "Answered by", "Inbound Missed": "Missed at", Outbound: "Made by", "Outbound Unanswered": "Made by"
+  }[call.direction] || "Handled by";
+
+  const seconds = durationSeconds(call.duration);
+  const sections = splitCallSections(description);
+  const content = [];
+  if (sections.transcription) content.push(["Transcript", sections.transcription]);
+  if (sections.summary) content.push(["Summary", sections.summary]);
+  if (sections.sentiment) content.push(["Sentiment", sections.sentiment]);
+  if (sections.recording) content.push(["Recording", sections.recording]);
+
+  return {
+    home,
+    short,
+    seconds,
+    headline: `${ukDate()} ${call.callTime} · ${directionLabel(call.direction)}` +
+      (seconds !== null ? ` · ${formatDuration(seconds)}` : ""),
+    route: kind === "person" && known ? `${verb} ${short}${home ? `, ${home}` : ""}` : short,
+    hintLine,
+    content
+  };
+}
+
+function entryLines(leg) {
+  const lines = [leg.headline, leg.route];
+  if (leg.hintLine) lines.push(leg.hintLine);
+  for (const [label, text] of leg.content) lines.push(`${label}: ${text}`);
+  return lines;
+}
+
+/**
+ * Folds a transferred leg into the latest entry: the durations add up, the
+ * route gains ", then …", and anything said is added, labelled with the
+ * extension once the entry already holds another leg's content.
+ */
+function joinLeg(lines, leg) {
+  const segments = lines[0].split(" · ");
+  const soFar = segments.length > 2 ? durationSeconds(segments[segments.length - 1]) : null;
+  if (soFar !== null) segments.pop();
+  if (soFar !== null || leg.seconds !== null) segments.push(formatDuration((soFar || 0) + (leg.seconds || 0)));
+  lines[0] = segments.join(" · ");
+
+  let route = lines[1] || "";
+  if (!route.includes(", then ") && soFar !== null) route += ` (${formatDuration(soFar)})`;
+  const where = leg.short.startsWith("ext ") && leg.home && !route.includes(leg.home) ? `, ${leg.home}` : "";
+  route += `, then ${leg.short}${where}${leg.seconds !== null ? ` (${formatDuration(leg.seconds)})` : ""}`;
+  lines[1] = route;
+
+  const hasContent = lines.length > 2;
+  if (leg.hintLine) lines.push(leg.hintLine);
+  for (const [label, text] of leg.content) {
+    lines.push(hasContent ? `${label} (${leg.short}): ${text}` : `${label}: ${text}`);
+  }
+}
+
+/**
+ * The record's Description with this leg written into its call history.
+ * A leg merged into the latest call log joins the latest entry, provided that
+ * entry is from today; anything else starts a new entry at the top.
+ */
+function writeCallHistory(existing, leg, continuation) {
+  const text = String(existing || "");
+  const start = text.indexOf(HISTORY_START);
+  const end = start === -1 ? -1 : text.indexOf(HISTORY_END, start);
+  let before, body = "", after;
+
+  if (start !== -1 && end !== -1) {
+    before = text.slice(0, start);
+    body = text.slice(start + HISTORY_START.length, end);
+    after = text.slice(end + HISTORY_END.length);
+  } else if (/^(New enquiry|Created when this number rang|Auto-created from the 3CX phone system)/.test(text)) {
+    // The opening lines stay above the history, and older text below it.
+    const gap = text.indexOf("\n\n");
+    before = gap === -1 ? `${text}\n\n` : text.slice(0, gap + 2);
+    after = gap === -1 ? "" : `\n\n${text.slice(gap + 2)}`;
+  } else {
+    before = "";
+    after = text.trim() ? `\n\n${text}` : "";
+  }
+
+  const entries = [];
+  for (const line of body.split("\n")) {
+    if (HISTORY_HEADLINE.test(line)) entries.push([line]);
+    else if (entries.length > 0) entries[entries.length - 1].push(line);
+  }
+  for (const entry of entries) {
+    while (entry.length > 1 && !entry[entry.length - 1].trim()) entry.pop();
+  }
+
+  if (continuation && entries.length > 0 && entries[0][0].startsWith(`${ukDate()} `)) {
+    joinLeg(entries[0], leg);
+  } else {
+    entries.unshift(entryLines(leg));
+  }
+
+  const build = () =>
+    `${before}${HISTORY_START}\n\n${entries.map(e => e.join("\n")).join("\n\n")}\n\n${HISTORY_END}${after}`;
+  let result = build();
+  while (result.length > SF_TEXT_LIMIT && entries.length > 1) {
+    entries.pop();
+    result = build();
+  }
+  return result.length > SF_TEXT_LIMIT ? truncateForSalesforce(result) : result;
+}
+
+async function appendCallToRecord(env, routing, instanceUrl, objectType, record, call, description, hintLine, continuation = false) {
+  const leg = callLeg(env, routing, call, description, hintLine);
   await sfWrite(env, `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}/${record.Id}`, {
     method: "PATCH",
-    body: JSON.stringify({
-      Description: truncateForSalesforce((record.Description || "") + appendix)
-    })
+    body: JSON.stringify({ Description: writeCallHistory(record.Description, leg, continuation) })
   });
 }
 
@@ -2257,7 +2383,7 @@ function recordPhone(record) {
  * backing contact); `record` is the object we actually update, which for a
  * Person Account is the Account itself.
  */
-async function maintainJournaledRecord(env, routingExts, instanceUrl, whoId, taskBody, agent = "") {
+async function maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBody, agent = "", continuation = false) {
   try {
     const resolved = await resolveJournaledRecord(env, instanceUrl, whoId);
     if (!resolved) return;
@@ -2301,7 +2427,7 @@ async function maintainJournaledRecord(env, routingExts, instanceUrl, whoId, tas
     };
 
     if (record.FirstName === DEFAULT_FIRST_NAME &&
-        !isRoutingExtension(routingExts, call.agent) &&
+        !isRoutingExtension(routing, call.agent) &&
         (record.LastName === call.phone || record.LastName === recordPhone(record))) {
       await attempt(() => sfWrite(env, recordUrl, {
         method: "PATCH",
@@ -2309,8 +2435,8 @@ async function maintainJournaledRecord(env, routingExts, instanceUrl, whoId, tas
       }));
     }
 
-    await attempt(() => appendCallToRecord(env, routingExts, instanceUrl, objectType, record, call, description, nameInfo.hintLine));
-    await attempt(() => upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, taskBody.OwnerId));
+    await attempt(() => appendCallToRecord(env, routing, instanceUrl, objectType, record, call, description, nameInfo.hintLine, continuation));
+    await attempt(() => upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, taskBody.OwnerId, routing, continuation));
 
     if (failures.length > 0) throw new Error(failures.join("; "));
   } catch (error) {
@@ -2319,14 +2445,41 @@ async function maintainJournaledRecord(env, routingExts, instanceUrl, whoId, tas
   }
 }
 
+/** Adds a call to the top of a reminder's "Calls:" list, starting one on an older reminder. */
+function addReminderCall(description, callLine, joinAs = null) {
+  const text = description || "";
+  const marker = "\nCalls:\n";
+  const at = text.indexOf(marker);
+  if (at === -1) return `${text}\n\nCalls:\n${callLine}`;
+
+  // A transferred leg extends today's top line instead of listing the same
+  // call twice.
+  const listStart = at + marker.length;
+  const lineEnd = text.indexOf("\n", listStart);
+  const top = text.slice(listStart, lineEnd === -1 ? text.length : lineEnd);
+  if (joinAs && top.startsWith(`${ukDate()} `)) {
+    const hint = callLine.includes("\n") ? callLine.slice(callLine.indexOf("\n")) : "";
+    return `${text.slice(0, listStart)}${top}, then ${joinAs}${hint}${lineEnd === -1 ? "" : text.slice(lineEnd)}`;
+  }
+  return `${text.slice(0, listStart)}${callLine}\n${text.slice(listStart)}`;
+}
+
 /**
  * Creates or updates the single open "Action Required" reminder for a
  * caller. `whoId` is what the reminder links to (Lead, or a Person
  * Account's backing contact); `record`/`objectType` describe what a human
  * needs to go and fix.
  */
-async function upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, ownerId) {
+async function upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, ownerId,
+                               routing = { queues: [], menus: [] }, continuation = false) {
+  // A menu or queue leg is not a call anyone took: the person who answers
+  // next raises or updates the reminder.
+  if (isRoutingExtension(routing, call.agent)) return;
+
   const today = ukToday();
+  const home = departmentFor(env, call.agent);
+  const callLine = `${ukDate()} ${call.callTime} · ${directionLabel(call.direction)} · ext ${call.agent}${home ? `, ${home}` : ""}` +
+    (nameInfo.hintLine ? `\n${nameInfo.hintLine}` : "");
   const openAlerts = await findOpenAlertTasks(env, instanceUrl, whoId);
   const noun = objectType === "Lead" ? "Lead" : "Contact";
 
@@ -2337,11 +2490,8 @@ async function upsertAlertTask(env, instanceUrl, whoId, record, objectType, call
     // Update the existing reminder instead of stacking a new one.
     const alert = openAlerts[0];
     const update = {
-      Description: truncateForSalesforce(
-        `${alert.Description || ""}\n\nRepeat call: ${call.phone} at ${call.callTime} (${call.direction}), ` +
-        `handled by extension ${call.agent}. Details still need to be filled in.` +
-        (nameInfo.hintLine ? `\n${nameInfo.hintLine}` : "")
-      ),
+      Description: truncateForSalesforce(addReminderCall(alert.Description, callLine,
+        continuation ? `ext ${call.agent}${home ? `, ${home}` : ""}` : null)),
       ActivityDate: today,
       Priority: "High"
     };
@@ -2368,11 +2518,11 @@ async function upsertAlertTask(env, instanceUrl, whoId, record, objectType, call
   const alertBody = {
     WhoId: whoId,
     Subject: `${ALERT_SUBJECT_PREFIX} Fill in details for Unregistered ${noun} ${call.phone}`,
-    Description: `An unsaved call was handled from ${call.phone} at ${call.callTime} by 3CX extension ${call.agent}.\n\n` +
-      `A ${objectType === "Account" ? "Person Account" : objectType} record exists for this caller: ` +
-      `"${record.FirstName || ""} ${record.LastName || ""}".\n\n` +
-      (nameInfo.hintLine ? `${nameInfo.hintLine}\nPlease confirm this with the caller before relying on it.\n\n` : "") +
-      nextStep,
+    Description: `Caller: ${call.phone}\n` +
+      `Record: ${`${record.FirstName || ""} ${record.LastName || ""}`.trim()}\n\n` +
+      `${nextStep}` +
+      (nameInfo.hintLine ? ` Any name mentioned on a call is unverified, so please confirm it with the caller.` : "") +
+      `\n\nCalls:\n${callLine}`,
     Status: "Not Started", // Open
     Priority: "High",      // High priority alert
     TaskSubtype: "Task",
@@ -2565,7 +2715,7 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
 
     // Read once here, because the background maintenance runs after the
     // response and no longer has the request to read headers from.
-    const routingExts = routingExtensionList(request.headers);
+    const routing = routingLists(request.headers);
 
     // A transferred call journals once per extension leg. Fold the later
     // legs into the first call log so one conversation stays one activity.
@@ -2575,7 +2725,7 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
       try {
         const mergedId = await mergeIntoRecentCallTask(env, instanceUrl, whoId, taskBody, call);
         if (mergedId) {
-          ctx.waitUntil(maintainJournaledRecord(env, routingExts, instanceUrl, whoId, taskBody, headerAgent));
+          ctx.waitUntil(maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBody, headerAgent, true));
           return jsonResponse({ id: mergedId, success: true, errors: [], merged: true }, 201);
         }
       } catch (error) {
@@ -2588,7 +2738,7 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
     const response = await forwardTask();
     if (response.ok) {
       if (isPersonRecord) {
-        ctx.waitUntil(maintainJournaledRecord(env, routingExts, instanceUrl, whoId, taskBody, headerAgent));
+        ctx.waitUntil(maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBody, headerAgent));
       }
       return response;
     }

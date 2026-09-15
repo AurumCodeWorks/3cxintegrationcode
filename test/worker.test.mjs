@@ -302,7 +302,7 @@ await runTest("repeat journaling updates contact + reminder (no duplicates)", as
   check(!alertTaskPost(), "no duplicate reminder created");
   const reminderPatch = taskPatches().find(p => p.body.Description);
   check(reminderPatch?.body.Description.includes("Original reminder text"), "reminder history preserved");
-  check(reminderPatch?.body.Description.includes("Repeat call: +447911123456"), "reminder notes the repeat call");
+  check(reminderPatch?.body.Description.includes("15:00 · Inbound · ext 102"), "reminder lists the repeat call");
   check(!reminderPatch?.body.Subject, "reminder subject not rewritten with a guessed name");
   check(reminderPatch?.body.Description.includes('Possible caller name mentioned: "Sarah Jones"'), "hint appended to the reminder body");
 });
@@ -419,7 +419,7 @@ await runTest("missed call journaling handled correctly", async () => {
   check(/^\+447700900123 \(Inbound Missed \d{2}:\d{2}, Ext 101\)$/.test(stampPatch?.body.LastName || ""),
     `first call stamps direction/time/ext onto the name (got "${stampPatch?.body.LastName}")`);
   const descPatch = contactPatches().find(p => p.body.Description);
-  check(descPatch?.body.Description.includes("Inbound Missed"), "direction captured in history");
+  check(descPatch?.body.Description.includes("· Missed"), "direction captured in history");
   const alert = alertTaskPost();
   check(alert?.Subject.includes("+447700900123"), "reminder references the number");
 });
@@ -601,7 +601,7 @@ await runTest("transfer: second leg merges into the first call log", async () =>
   const merged = calls.filter(c => c.method === "PATCH" && c.url.includes("/sobjects/Task/00TLEG0000000001AA"))
     .map(c => JSON.parse(c.body))[0];
   check(merged?.Description.includes("First leg, answered on reception"), "original leg preserved");
-  check(merged?.Description.includes("Call continued on extension 102"), "continuation header added");
+  check(merged?.Description.includes("Then ext 102 at 15:00"), "continuation line added");
   check(merged?.Description.includes("my name is Sarah Jones"), "second leg transcript appended");
   check(merged?.CallDurationInSeconds === 345, "durations summed across both legs");
 });
@@ -1458,7 +1458,7 @@ await runTest("history: caller's own name is not echoed back into their history"
   const d = appendedDescription();
   check(!d.includes("Answered incoming call from"), "3CX's raw line not pasted into the record");
   check(!d.includes("Unregistered Contact +447911123456 to"), "display name not echoed");
-  check(d.includes("Transcription: Hello my name is Sarah Jones"), "transcript still kept");
+  check(d.includes("Transcript: Hello my name is Sarah Jones"), "transcript still kept");
 });
 
 // R3: sections with no content are dropped rather than left as empty headings
@@ -1474,8 +1474,8 @@ await runTest("history: empty transcript sections are omitted", async () => {
   check(!/Transcription:\s*$/m.test(d), "no empty Transcription heading");
   check(!/Summary:\s*$/m.test(d), "no empty Summary heading");
   check(!/Sentiment:\s*$/m.test(d), "no empty Sentiment heading");
-  check(d.includes("No transcription or recording available"), "says so plainly instead");
-  check(d.includes("00:09:42"), "duration still recorded in the header");
+  check(!d.includes("No transcription"), "no filler line in place of the sections");
+  check(d.includes("15:00 · Inbound · 9:42"), "duration recorded in the headline");
 });
 
 // R4: the site an extension belongs to reaches the record
@@ -1489,7 +1489,7 @@ await runTest("history: department mapped from the extension", async () => {
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
   check(name.includes("Bath House"), `longest prefix wins over shorter (got "${name}")`);
   check(!name.includes("Arbour Walk"), "shorter prefix not used when a longer one matches");
-  check(appendedDescription().includes("Ext 102 (Bath House)"), "site shown in the call block");
+  check(appendedDescription().includes("Answered by ext 102, Bath House"), "home shown in the call entry");
 });
 
 // R5: unmapped extensions and bad JSON degrade quietly
@@ -1503,7 +1503,7 @@ await runTest("history: no department mapping changes nothing", async () => {
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
   check(/^\+447911123456 \(Inbound 15:00, Ext 102\)$/.test(name),
     `invalid JSON ignored, name unchanged (got "${name}")`);
-  check(appendedDescription().includes("Ext 102"), "call block still names the extension");
+  check(appendedDescription().includes("Answered by ext 102"), "call entry still names the extension");
 });
 
 // ── Routing legs (auto attendant, queue) ────────────────────────────────
@@ -1527,7 +1527,7 @@ await runTest("routing: auto attendant does not stamp the record name", async ()
   check(!contactPatches().some(p => p.body.LastName),
     "name left as the bare number, so the human leg can stamp it");
   const d = appendedDescription();
-  check(d.includes("Routed via extension 1001 at 15:44"), "recorded as a one-line routing note");
+  check(d.includes("15:44 · Inbound · 1:02\nmenu 1001"), "recorded as a short routing entry");
   check(!d.includes("====="), "no full call block for a routing leg");
   check(!d.includes("No transcription or recording available"), "no filler about a missing transcript");
 });
@@ -1540,8 +1540,8 @@ await runTest("routing: queue hold recorded compactly with its wait", async () =
   await Promise.all(ctx.tasks);
 
   const d = appendedDescription();
-  check(d.includes("Reception queue (1002)"), "queue named from the department map");
-  check(d.includes("held 28:14"), "wait time kept, since it is worth knowing");
+  check(d.includes("Reception queue menu 1002"), "named from the department map");
+  check(d.includes("· 28:14"), "wait time kept, since it is worth knowing");
   check(!d.includes("====="), "no full call block");
 });
 
@@ -1554,7 +1554,7 @@ await runTest("routing: the human leg still stamps and logs in full", async () =
 
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
   check(name.includes("Ext 102"), `real extension stamps the name (got "${name}")`);
-  check(appendedDescription().includes("====="), "full block for a real conversation");
+  check(appendedDescription().includes("Transcript: Hello my name is Sarah Jones"), "full entry for a real conversation");
 });
 
 // S4: a routing leg that somehow carries a transcript is not discarded
@@ -1567,7 +1567,7 @@ await runTest("routing: a routing leg with a transcript keeps it", async () => {
 
   const d = appendedDescription();
   check(d.includes("Caller asked for the nursing team"), "transcript preserved");
-  check(d.includes("====="), "given a full block because something was said");
+  check(d.includes("Transcript: Caller asked for the nursing team"), "kept in full because something was said");
 });
 
 // S5: a PBX still on an older template falls back to the variable
@@ -1579,7 +1579,7 @@ await runTest("routing: a tracked queue counts as a system extension without lis
   await Promise.all(ctx.tasks);
 
   const d = appendedDescription();
-  check(d.includes("held 28:14"), "queue leg recorded compactly");
+  check(d.includes("queue 1002"), "queue leg recorded as a queue");
   check(!d.includes("====="), "no full call block");
   check(!contactPatches().some(p => p.body.LastName), "queue does not stamp the record name");
 });
@@ -1591,7 +1591,7 @@ await runTest("routing: unconfigured means every extension is treated as a perso
   await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ivrDescription)), env, ctx);
   await Promise.all(ctx.tasks);
 
-  check(appendedDescription().includes("====="), "auto attendant leg gets a full block");
+  check(appendedDescription().includes("Answered by ext 1001"), "an unlisted extension is treated as a person");
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
   check(name.includes("Ext 1001"), `and stamps the menu extension onto the name (got "${name}")`);
 });
@@ -1606,7 +1606,7 @@ await runTest("routing: wildcard matches a family of system extensions", async (
     { "X-Receptionist-Extensions": "1001, GRP*" }), env, ctx);
   await Promise.all(ctx.tasks);
 
-  check(appendedDescription().includes("Routed via extension GRP0007"), "ring group matched by prefix");
+  check(appendedDescription().includes("menu GRP0007"), "ring group matched by prefix");
   check(!contactPatches().some(p => p.body.LastName), "does not stamp the record name");
 });
 
@@ -1623,6 +1623,120 @@ await runTest("routing: entries without a wildcard stay exact", async () => {
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
   check(name.includes("Ext 1050"), `"10" does not swallow 1050 (got "${name}")`);
   check(appendedDescription().includes("Hello, this is the nursing team"), "treated as a real conversation");
+});
+
+// ── Call history format ─────────────────────────────────────────────────
+
+const ukToday = (() => {
+  const [dd, mm, yyyy] = new Date().toLocaleDateString("en-GB", { timeZone: "Europe/London", day: "numeric", month: "numeric", year: "numeric" }).split("/");
+  return `${Number(dd)} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][Number(mm) - 1]} ${yyyy}`;
+})();
+const historyOf = (...entries) =>
+  `--- 3CX call history, newest first ---\n\n${entries.join("\n\n")}\n\n--- end of call history ---`;
+const enquiryRecord = (description) => ({
+  Id: "003HIST000000001AA", FirstName: "Arbour Walk", LastName: "Enquiry +447911123456 (15 Sep 15:00)",
+  Phone: "+447911123456", Description: description
+});
+const historyRoutes = (record, extra = []) => [
+  tokenRoute,
+  ...extra,
+  { match: taskPost, reply: { json: { id: "00THIST00000000001A" }, status: 201 } },
+  { match: byId, reply: { records: [record] } },
+  { match: byTask, reply: { records: [] } },
+  patch204, delete204
+];
+
+// H1: a transferred leg joins the latest entry rather than starting another
+await runTest("history: receptionist and answering legs become one entry", async () => {
+  const existing = `New enquiry through Arbour Walk (queue 800)\n${ukToday} at 15:00\n\n` +
+    historyOf(`${ukToday} 15:00 · Inbound · 0:56\nArbour Walk menu 1001`);
+  routes = historyRoutes(enquiryRecord(existing), [
+    { match: recentCallQuery, reply: { records: [{ Id: "00TPRIOR0000000002A", Description: "menu leg", CallDurationInSeconds: 56 }] } }
+  ]);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003HIST000000001AA"), { "X-Receptionist-Extensions": "1001" }),
+    { ...env, EXTENSION_DEPARTMENTS: '{"10":"Arbour Walk"}' }, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check((d.match(/^\d{1,2} [A-Z][a-z]{2} \d{4} \d{1,2}:\d{2} · /gm) || []).length === 1, "still a single entry");
+  check(d.includes(`${ukToday} 15:00 · Inbound · 1:31`), "durations added together");
+  check(d.includes("Arbour Walk menu 1001 (0:56), then ext 102 (0:35)"), "route shows both legs");
+  check(d.includes("Transcript: Hello my name is Sarah Jones"), "what was said is added");
+  check(d.startsWith("New enquiry through Arbour Walk (queue 800)"), "opening lines kept");
+});
+
+// H2: a new call goes on top, and notes a person added stay where they were
+await runTest("history: newest call first, and a person's notes are left alone", async () => {
+  const existing = `New enquiry through Arbour Walk (queue 800)\n1 Sep 2026 at 09:00\n\n` +
+    historyOf("1 Sep 2026 09:00 · Inbound · 2:00\nAnswered by ext 105") + "\n\nNotes: prefers a call in the morning";
+  routes = historyRoutes(enquiryRecord(existing), [noRecentCall]);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003HIST000000001AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check(d.indexOf(`${ukToday} 15:00`) < d.indexOf("1 Sep 2026 09:00"), "today's call above the older one");
+  check(d.endsWith("--- end of call history ---\n\nNotes: prefers a call in the morning"), "notes untouched below the history");
+  check((d.match(/--- 3CX call history/g) || []).length === 1, "one history section");
+});
+
+// H3: when the field fills, the oldest calls go, never the notes
+await runTest("history: oldest calls dropped to fit, notes kept", async () => {
+  const old = Array.from({ length: 40 }, (_, i) =>
+    `1 Aug 2026 ${String(i % 24).padStart(2, "0")}:00 · Inbound · 1:00\nAnswered by ext 105\nTranscript: ${"words ".repeat(160)}`);
+  const existing = historyOf(...old) + "\n\nNotes: keep this";
+  routes = historyRoutes(enquiryRecord(existing), [noRecentCall]);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003HIST000000001AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check(d.length <= 30000, "within the Description limit");
+  check(d.includes("Notes: keep this"), "notes kept");
+  check(d.indexOf(`${ukToday} 15:00`) !== -1 && d.indexOf(`${ukToday} 15:00`) < d.indexOf("1 Aug 2026"), "newest call kept at the top");
+  check((d.match(/1 Aug 2026/g) || []).length < 40, "oldest calls dropped");
+});
+
+// H4: a record from before the new format keeps its old text below the history
+await runTest("history: older free-text descriptions are kept underneath", async () => {
+  routes = historyRoutes(enquiryRecord("Spoke to the daughter last week."), [noRecentCall]);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003HIST000000001AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const d = appendedDescription();
+  check(d.startsWith("--- 3CX call history, newest first ---"), "history starts the description");
+  check(d.endsWith("Spoke to the daughter last week."), "existing text kept after it");
+});
+
+// H6: a menu leg adds to the history but raises no reminder of its own
+await runTest("history: a menu leg raises no reminder", async () => {
+  routes = historyRoutes(enquiryRecord(""), [noRecentCall]);
+  const ctx = makeCtx();
+  const menuLeg = "17/07/2026 15:00: Answered incoming call from 447911123456 to 1001 (00:00:56)\n\nTranscription: \n\nSummary: \n\nSentiment: \n\nRecording:";
+  await worker.fetch(taskRequest(callTaskBody("003HIST000000001AA", menuLeg), { "X-Receptionist-Extensions": "10*" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(appendedDescription().includes("menu 1001"), "menu leg recorded in the history");
+  check(!alertTaskPost(), "no reminder raised for the menu");
+});
+
+// H5: a reminder lists its calls newest first
+await runTest("history: reminder lists repeat calls newest first", async () => {
+  routes = [
+    tokenRoute,
+    noRecentCall,
+    { match: taskPost, reply: { json: { id: "00THIST00000000002A" }, status: 201 } },
+    { match: byId, reply: { records: [enquiryRecord("")] } },
+    { match: byTask, reply: { records: [{ Id: "00TREM0000000001AA", Description: "Caller: +447911123456\n\nCalls:\n1 Sep 2026 09:00 · Inbound · ext 105" }] } },
+    patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003HIST000000001AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+
+  const reminder = taskPatches().find(p => p.url.includes("00TREM0000000001AA"))?.body.Description || "";
+  check(reminder.indexOf(`${ukToday} 15:00 · Inbound · ext 102`) < reminder.indexOf("1 Sep 2026 09:00"), "today's call listed first");
 });
 
 // ── Tracked queues ──────────────────────────────────────────────────────
@@ -2239,6 +2353,7 @@ await runTest("gaps: enquiry named home first from 3CX departments", async () =>
   await Promise.all(ctx.tasks);
   const created = JSON.parse(contactPosts()[0]?.body || "{}");
   check(created.FirstName === "Arbour Walk", "first name is the home");
+  check((created.Description || "").startsWith("New enquiry through Arbour Walk (queue 800)\n"), "description opens with where the enquiry came in");
   check(/^Enquiry \+447911123456 \(\d{1,2} [A-Z][a-z]{2} 15:00\)$/.test(created.LastName || ""), `last name is Enquiry, the number and the call time (got ${created.LastName})`);
   check(!!alertTaskPost(), "still unregistered, so a reminder is raised");
   check(!contactPatches().some(p => p.body.LastName), "not renamed after creation");
