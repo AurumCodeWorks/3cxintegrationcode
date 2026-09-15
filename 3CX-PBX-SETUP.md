@@ -475,7 +475,7 @@ Auto attendants and queue legs are menu prompts and hold music. There is nothing
 Routed via extension 1001 at 12:21, held 04:35.
 ```
 
-List those extensions under **System Extensions** in the CRM template so they are treated as routing rather than as callers.
+List the receptionist and ring group extensions under **Receptionist Extensions** in the CRM template so they are treated as routing rather than as callers. Tracked queues count automatically.
 
 ### Verifying, one level at a time
 
@@ -607,7 +607,7 @@ In order, because each depends on the last:
 | Odd audio artefacts on a UK trunk | Codec priority has PCMU (mu-law) above PCMA (A-law) |
 | International fails, rules look correct | Country not in the allowed country codes list, or international barred on the carrier account |
 | International dialled as `+…` fails but `00…` works | Missing the `+` pass-through rule, so E.164 numbers fall into the UK rule |
-| Inbound rings the wrong place or nowhere | DID entered in a different format from the one the carrier presents. Use the last 6-9 digits. |
+| Inbound rings the wrong place or nowhere | DID entered in a different format from the one the carrier presents. Enter it as it appears in [ddi-plain.txt](ddi-plain.txt), and check the trunk's DID Numbers tab against a test call's caller detail. |
 | Inbound fails on every DDI, trunk healthy | Carrier has not routed the DDIs to the trunk. Check the Route column on the provisioning document. |
 | Calls connect with no audio | RTP range closed, or SIP ALG enabled on the router |
 | Calls drop at ~30 seconds | SIP ALG, or NAT keepalive not traversing |

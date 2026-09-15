@@ -15,7 +15,8 @@ globalThis.fetch = async (url, init = {}) => {
   const record = {
     url: String(url),
     method: (init.method || "GET").toUpperCase(),
-    body: init.body ? String(init.body) : null
+    body: init.body ? String(init.body) : null,
+    headers: new Headers(init.headers || {})
   };
   calls.push(record);
   for (const route of routes) {
@@ -423,22 +424,6 @@ await runTest("missed call journaling handled correctly", async () => {
   check(alert?.Subject.includes("+447700900123"), "reminder references the number");
 });
 
-// T12: a 3CX lookup cached before ring-time creation could still send the
-// old placeholder id. It is not a valid Salesforce id, so the call log must
-// survive unlinked rather than the insert failing outright.
-await runTest("legacy placeholder id is stripped, call log survives", async () => {
-  routes = [
-    tokenRoute,
-    { match: taskPost, reply: { json: { id: "00TCALL0000000007AA" }, status: 201 } }
-  ];
-  const ctx = makeCtx();
-  const res = await worker.fetch(taskRequest(callTaskBody("UNSAVED_CONTACT_PLACEHOLDER")), env, ctx);
-  await Promise.all(ctx.tasks);
-  check(res.status === 201, "task journaled");
-  check(forwardedCallTask()?.WhoId === undefined, "invalid placeholder id removed before insert");
-  check(forwardedCallTask()?.Description.includes("my name is Sarah Jones"), "transcript still reaches Salesforce");
-});
-
 // ── Call filtering ──────────────────────────────────────────────────────
 
 // F1: internal extension-to-extension call creates nothing at ring time
@@ -678,7 +663,7 @@ await runTest("transfer: long second leg still merges", async () => {
   check((await res.json()).merged === true, "long leg merged rather than logged separately");
 
   const query = decodeURIComponent(calls.find(recentCallQuery).url).replace(/\+/g, " ");
-  const since = new Date(query.match(/CreatedDate >= (\S+)/)[1]);
+  const since = new Date(query.match(/LastModifiedDate >= (\S+)/)[1]);
   const windowMinutes = (Date.now() - since.getTime()) / 60_000;
   check(windowMinutes > 15, `window covers the second leg's duration (${windowMinutes.toFixed(1)} min)`);
 });
@@ -796,6 +781,8 @@ const byAccountPhone = r => r.method === "GET" && r.url.includes("FROM+Account+W
 const byAccountContactId = r => r.method === "GET" && r.url.includes("FROM+Account+WHERE+PersonContactId");
 const byLeadPhone = r => r.method === "GET" && r.url.includes("FROM+Lead+WHERE+IsConverted");
 const byLeadId = r => r.method === "GET" && r.url.includes("FROM+Lead+WHERE+Id");
+const byBusinessContact = r => r.method === "GET" && r.url.includes("FROM+Contact+WHERE+IsPersonAccount+%3D+false");
+const noBusinessContact = { match: byBusinessContact, reply: { records: [] } };
 const recordTypeQuery = r => r.method === "GET" && r.url.includes("FROM+RecordType");
 const accountPost = r => r.method === "POST" && r.url.endsWith("/sobjects/Account");
 const leadPost = r => r.method === "POST" && r.url.endsWith("/sobjects/Lead");
@@ -816,6 +803,7 @@ await runTest("personaccount: missing record type creates nothing", async () => 
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
+    noBusinessContact,
     { match: byAccountPhone, reply: { records: [] } },
     { match: recordTypeQuery, reply: { records: [] } }
   ];
@@ -832,6 +820,7 @@ await runTest("personaccount: ring-time creates Person Account with record type"
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
+    noBusinessContact,
     { match: recordTypeQuery, reply: { records: [{ Id: "012RT00000000001AAA" }] } },
     { match: byAccountPhone, reply: (r, hits) => hits === 1
       ? { records: [] }
@@ -922,6 +911,7 @@ await runTest("lead: unknown caller creates a Lead with blank Company", async ()
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
+    noBusinessContact,
     { match: byAccountPhone, reply: { records: [] } },
     { match: byLeadPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [openLead("00QLD0000000001AAA", "+447911123456")] } },
     { match: leadPost, reply: { json: { id: "00QLD0000000001AAA" }, status: 201 } }
@@ -1017,6 +1007,7 @@ await runTest("extra fields from config are stamped onto created records", async
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
+    noBusinessContact,
     { match: byAccountPhone, reply: { records: [] } },
     { match: byLeadPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [openLead("00QLD0000000003AAA", "+447911123456")] } },
     { match: leadPost, reply: { json: { id: "00QLD0000000003AAA" }, status: 201 } }
@@ -1033,6 +1024,7 @@ await runTest("invalid extra-field JSON is ignored rather than fatal", async () 
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
+    noBusinessContact,
     { match: byAccountPhone, reply: { records: [] } },
     { match: byLeadPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [openLead("00QLD0000000004AAA", "+447911123456")] } },
     { match: leadPost, reply: { json: { id: "00QLD0000000004AAA" }, status: 201 } }
@@ -1221,6 +1213,7 @@ await runTest("personaccount + key: new caller inserted with the key set", async
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
+    noBusinessContact,
     { match: recordTypeQuery, reply: { records: [{ Id: "012RT00000000001AAA" }] } },
     { match: paKeyGet, reply: { json: [{ errorCode: "NOT_FOUND" }], status: 404 } },
     { match: paKeyQ, reply: { records: [{ Id: "001NEW0000000001AAA", PersonContactId: "003NEW0000000001AAA" }] } },
@@ -1243,6 +1236,7 @@ await runTest("personaccount + key: fallback insert still carries the key", asyn
   routes = [
     tokenRoute,
     { match: sfSearch, reply: { searchRecords: [] } },
+    noBusinessContact,
     { match: recordTypeQuery, reply: { records: [{ Id: "012RT00000000001AAA" }] } },
     { match: paKeyGet, reply: { json: [{ errorCode: "SERVER_ERROR" }], status: 503 } },
     { match: paKeyQ, reply: { records: [] } },
@@ -1521,8 +1515,7 @@ const queueDescription =
   "17/07/2026 15:45: Answered incoming call from 447911123456 to 1002 (28:14)\n\n" +
   "Transcription: \n\nSummary: \n\nSentiment: \n\nRecording:";
 const sysEnv = { ...env, EXTENSION_DEPARTMENTS: '{"1002":"Reception queue"}' };
-const sysHeaders = { "X-System-Extensions": "1001,1002" };
-const legacySysEnv = { ...env, SYSTEM_EXTENSIONS: "1001,1002" };
+const sysHeaders = { "X-Receptionist-Extensions": "1001,1002" };
 
 // S1: an auto attendant leg must not claim the record's name
 await runTest("routing: auto attendant does not stamp the record name", async () => {
@@ -1578,14 +1571,17 @@ await runTest("routing: a routing leg with a transcript keeps it", async () => {
 });
 
 // S5: a PBX still on an older template falls back to the variable
-await runTest("routing: SYSTEM_EXTENSIONS variable still honoured without the header", async () => {
+await runTest("routing: a tracked queue counts as a system extension without listing it twice", async () => {
   routes = maintenanceRoutes();
   const ctx = makeCtx();
-  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ivrDescription)), legacySysEnv, ctx);
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", queueDescription),
+    { "X-Tracked-Queues": "1002" }), sysEnv, ctx);
   await Promise.all(ctx.tasks);
 
-  check(appendedDescription().includes("Routed via extension 1001"), "recognised from the variable alone");
-  check(!contactPatches().some(p => p.body.LastName), "still does not stamp the record name");
+  const d = appendedDescription();
+  check(d.includes("held 28:14"), "queue leg recorded compactly");
+  check(!d.includes("====="), "no full call block");
+  check(!contactPatches().some(p => p.body.LastName), "queue does not stamp the record name");
 });
 
 // S6: with neither configured, nothing is treated as routing
@@ -1607,7 +1603,7 @@ await runTest("routing: wildcard matches a family of system extensions", async (
   routes = maintenanceRoutes();
   const ctx = makeCtx();
   await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", groupCall),
-    { "X-System-Extensions": "1001, GRP*" }), env, ctx);
+    { "X-Receptionist-Extensions": "1001, GRP*" }), env, ctx);
   await Promise.all(ctx.tasks);
 
   check(appendedDescription().includes("Routed via extension GRP0007"), "ring group matched by prefix");
@@ -1621,7 +1617,7 @@ await runTest("routing: entries without a wildcard stay exact", async () => {
   routes = maintenanceRoutes();
   const ctx = makeCtx();
   await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", ext1050),
-    { "X-System-Extensions": "10, 1001" }), env, ctx);
+    { "X-Receptionist-Extensions": "10, 1001" }), env, ctx);
   await Promise.all(ctx.tasks);
 
   const name = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
@@ -1629,9 +1625,255 @@ await runTest("routing: entries without a wildcard stay exact", async () => {
   check(appendedDescription().includes("Hello, this is the nursing team"), "treated as a real conversation");
 });
 
+// ── Tracked queues ──────────────────────────────────────────────────────
+// Only calls answered through a tracked queue create a record for an unknown
+// caller. 3CX cannot tell a lookup which queue a call is on, so the lookup
+// returns a stand-in and the decision is made when the call is journaled.
+
+const tracked = (over = {}) => ({ "X-Tracked-Queues": "800", ...over });
+const standIn = "PENDING_CALLER_447911123456";
+const queueLegDescription = inboundDescription.replace(" to 102 ", " to 800 ");
+
+// Q1: unknown caller at ring time gets a stand-in, and nothing is created
+await runTest("tracked queues: unknown caller gets a stand-in at ring time", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [] } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id,FirstName,LastName,Phone)", tracked()),
+    env, makeCtx());
+  const match = (await res.json()).searchRecords?.[0];
+  check(match?.Id === standIn, "stand-in id carries the number");
+  check(match?.FirstName === "New Caller", "agent sees a new caller");
+  check(!/ to |Ext/.test(`${match?.FirstName} ${match?.LastName}`), "no direction text in the name");
+  check(contactPosts().length === 0, "nothing created at ring time");
+});
+
+// Q2: an existing record is still found and returned at ring time
+await runTest("tracked queues: existing record returned at ring time", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [ringTimeContact("003EXIST0000001AAA", "+447911123456")] } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)", tracked()), env, makeCtx());
+  check((await res.json()).searchRecords?.[0]?.Id === "003EXIST0000001AAA", "real record returned");
+});
+
+// Q3: an outbound call to an unknown number gets nothing
+await runTest("tracked queues: outbound to an unknown number stays empty", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [] } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)", tracked({ "X-Call-Direction": "Outbound" })),
+    env, makeCtx());
+  check((await res.json()).searchRecords.length === 0, "no stand-in for outbound");
+  check(contactPosts().length === 0, "nothing created");
+});
+
+// Q4: answered through a tracked queue, so the record is created and the call linked to it
+await runTest("tracked queues: answered through a tracked queue creates the record", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [ringTimeContact("003NEW0000000001AA", "+447911123456")] } },
+    { match: contactPost, reply: { json: { id: "003NEW0000000001AA" }, status: 201 } },
+    { match: taskPost, reply: { json: { id: "00TCALL0000000030AA" }, status: 201 } },
+    { match: byId, reply: { records: [ringTimeContact("003NEW0000000001AA", "+447911123456")] } },
+    noRecentCall,
+    { match: byTask, reply: { records: [] } },
+    patch204, delete204
+  ];
+  const ctx = makeCtx();
+  const res = await worker.fetch(
+    taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" })), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(res.status === 201, "call logged");
+  check(contactPosts().length === 1, "one record created");
+  check(JSON.parse(contactPosts()[0].body).Phone === "+447911123456", "created with the E.164 number");
+  check(forwardedCallTask()?.WhoId === "003NEW0000000001AA", "call linked to the new record, not the stand-in");
+});
+
+// Q5: a wildcard selects a family of queues
+await runTest("tracked queues: wildcard selects a range of queues", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [ringTimeContact("003NEW0000000002AA", "+447911123456")] } },
+    { match: contactPost, reply: { json: { id: "003NEW0000000002AA" }, status: 201 } },
+    { match: taskPost, reply: { json: { id: "00TCALL0000000031AA" }, status: 201 } },
+    { match: byId, reply: { records: [ringTimeContact("003NEW0000000002AA", "+447911123456")] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(
+    taskRequest(callTaskBody(standIn), { "X-Tracked-Queues": "80*", "X-Queue-Extension": "801" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(contactPosts().length === 1, "queue 801 matched by 80*");
+});
+
+// Q6: unknown caller on any other route, so nothing is created or logged
+await runTest("tracked queues: unknown caller on another route is dropped", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [] } }
+  ];
+  const ctx = makeCtx();
+  const res = await worker.fetch(
+    taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "[QueueExtension]" })), env, ctx);
+  await Promise.all(ctx.tasks);
+  const body = await res.json();
+  check(res.status === 201 && body.success === true, "3CX told it succeeded, so it does not retry");
+  check(body.filtered === "queue", "reported as a queue filter");
+  check(contactPosts().length === 0, "no record created");
+  check(!calls.some(taskPost), "no call log written");
+});
+
+// Q7: the leg for the queue itself (nobody answered yet) never creates a record
+await runTest("tracked queues: unanswered queue leg does not create", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [] } }
+  ];
+  const ctx = makeCtx();
+  const res = await worker.fetch(
+    taskRequest(callTaskBody(standIn, queueLegDescription), tracked({ "X-Queue-Extension": "800" })), env, ctx);
+  await Promise.all(ctx.tasks);
+  check((await res.json()).filtered === "queue", "abandoned or diverted enquiry dropped");
+  check(contactPosts().length === 0, "no record created");
+});
+
+// Q8: existing record on another route is logged while Always Log is on (the default)
+await runTest("tracked queues: existing record logged on any route by default", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"), tracked()), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(!!forwardedCallTask(), "call logged against the existing record");
+});
+
+// Q9: Always Log off, so an existing record on another route is dropped
+await runTest("tracked queues: always-log off drops untracked calls for existing records", async () => {
+  routes = [tokenRoute, noRecentCall];
+  const ctx = makeCtx();
+  const res = await worker.fetch(
+    taskRequest(callTaskBody("003RING00000001AAA"), tracked({ "X-Log-Existing-Always": "False" })), env, ctx);
+  await Promise.all(ctx.tasks);
+  check((await res.json()).filtered === "queue", "dropped");
+  check(!calls.some(taskPost), "no call log written");
+});
+
+// Q10: Always Log off, but an existing record through a tracked queue is still logged
+await runTest("tracked queues: always-log off still logs tracked calls", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"),
+    tracked({ "X-Log-Existing-Always": "False", "X-Queue-Extension": "800" })), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(!!forwardedCallTask(), "tracked call logged");
+});
+
+// Q11: Always Log off, but a transfer out of a tracked call is kept and merged
+await runTest("tracked queues: always-log off keeps a transferred leg of a tracked call", async () => {
+  routes = [
+    tokenRoute,
+    { match: recentCallQuery, reply: { records: [{ Id: "00TPRIOR0000000001A", Description: "first leg", CallDurationInSeconds: 30 }] } },
+    { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+    { match: byTask, reply: { records: [] } },
+    patch204, delete204
+  ];
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"),
+    tracked({ "X-Log-Existing-Always": "False" })), env, ctx);
+  await Promise.all(ctx.tasks);
+  check((await res.json()).merged === true, "leg merged into the tracked call");
+  check(taskPatches().some(p => p.url.includes("00TPRIOR0000000001A")), "prior call log updated");
+});
+
+// Q12: Salesforce failing on a tracked call logs it unlinked, never loses it
+await runTest("tracked queues: Salesforce failure logs a tracked call unlinked", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { status: 500, json: [{ errorCode: "SERVER_UNAVAILABLE" }] } },
+    { match: byPhone, reply: { status: 500, json: [{ errorCode: "SERVER_UNAVAILABLE" }] } },
+    { match: taskPost, reply: { json: { id: "00TCALL0000000032AA" }, status: 201 } }
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" })), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(contactPosts().length === 0, "nothing created blind");
+  check(forwardedCallTask() && !("WhoId" in forwardedCallTask()), "call log kept, unlinked");
+});
+
+// Q13: lead mode, the live configuration, creates a Lead
+await runTest("tracked queues: lead mode creates a Lead", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    noBusinessContact,
+    { match: byAccountPhone, reply: { records: [] } },
+    { match: byLeadPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [openLead("00QNEW0000000001AA", "+447911123456")] } },
+    { match: leadPost, reply: { json: { id: "00QNEW0000000001AA" }, status: 201 } },
+    { match: taskPost, reply: { json: { id: "00TCALL0000000033AA" }, status: 201 } },
+    { match: byLeadId, reply: { records: [openLead("00QNEW0000000001AA", "+447911123456")] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" })), leadEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(calls.filter(leadPost).length === 1, "one Lead created");
+  check(!("Company" in JSON.parse(calls.find(leadPost).body)), "Company left blank so it converts to a Person Account");
+  check(forwardedCallTask()?.WhoId === "00QNEW0000000001AA", "call linked to the Lead");
+});
+
+// Q13b: a blank Tracked Queues list that 3CX omits must not revert to creating for everyone
+await runTest("tracked queues: a blank list creates nothing, rather than reverting to old behaviour", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [] } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)", { "X-Log-Existing-Always": "True" }),
+    env, makeCtx());
+  check((await res.json()).searchRecords.length === 0, "no stand-in while no queue is tracked");
+  check(contactPosts().length === 0, "no ring-time record");
+});
+
+// Q13c: a receptionist leg that carries the queue is not someone answering
+await runTest("tracked queues: receptionist leg never counts as answered, even with the queue on it", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { records: [] } }
+  ];
+  const ctx = makeCtx();
+  const receptionistLeg = inboundDescription.replace(" to 102 ", " to 1001 ");
+  const res = await worker.fetch(taskRequest(callTaskBody(standIn, receptionistLeg),
+    tracked({ "X-Queue-Extension": "800", "X-Receptionist-Extensions": "1001" })), env, ctx);
+  await Promise.all(ctx.tasks);
+  check((await res.json()).filtered === "queue", "receptionist leg dropped");
+  check(contactPosts().length === 0, "no Lead for a caller who pressed 1 and hung up");
+});
+
+// Q14: the CRM link for a stand-in opens the object list, not a missing record
+await runTest("tracked queues: stand-in CRM link opens the object list", async () => {
+  routes = [tokenRoute];
+  const res = await worker.fetch(new Request(`https://worker.example/${standIn}`), leadEnv, makeCtx());
+  check(res.status === 302 && res.headers.get("Location").endsWith("/lightning/o/Lead/home"), "redirects to Leads");
+});
+
 // ── Excluded extensions ─────────────────────────────────────────────────
 
-// E1: a confidential extension's call never reaches Salesforce
+// E1: an excluded extension's call never reaches Salesforce
 await runTest("excluded ext: call log dropped entirely", async () => {
   routes = [tokenRoute];
   const ctx = makeCtx();
@@ -1666,30 +1908,26 @@ await runTest("excluded ext: other extensions still logged", async () => {
   check(!!forwardedCallTask(), "unlisted extension journals normally");
 });
 
-// E4: ring time, when 3CX supplies the extension, nothing is created
-await runTest("excluded ext: no record created at ring time", async () => {
-  routes = [tokenRoute, { match: sfSearch, reply: { searchRecords: [] } }];
-  const res = await worker.fetch(
-    lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)",
-      { "X-Excluded-Extensions": "102", "X-Agent-Extension": "102" }), env, makeCtx());
-
-  check((await res.json()).searchRecords.length === 0, "lookup stays empty");
+// E4: an exclusion beats Tracked Queues, so no record is created
+await runTest("excluded ext: wins over a tracked queue, nothing created", async () => {
+  routes = [tokenRoute];
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(callTaskBody("PENDING_CALLER_447911123456"),
+    { "X-Tracked-Queues": "800", "X-Queue-Extension": "800", "X-Excluded-Extensions": "102" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check((await res.json()).filtered === "extension", "dropped as excluded");
   check(!calls.some(contactPost), "no record created");
+  check(!calls.some(taskPost), "no call log written");
 });
 
-// E5: an unsubstituted placeholder must not be mistaken for an extension
-await runTest("excluded ext: unsubstituted [Agent] placeholder ignored", async () => {
-  routes = [
-    tokenRoute,
-    { match: sfSearch, reply: { searchRecords: [] } },
-    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003NEW0000000001AA", Phone: "+447911123456" }] } },
-    { match: contactPost, reply: { json: { id: "003NEW0000000001AA" }, status: 201 } }
-  ];
-  await worker.fetch(
-    lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)",
-      { "X-Excluded-Extensions": "102", "X-Agent-Extension": "[Agent]" }), env, makeCtx());
-
-  check(calls.some(contactPost), "record still created, placeholder not treated as an extension");
+// E5: a whole queue can be excluded by its extension
+await runTest("excluded ext: excluding a queue drops calls through it", async () => {
+  routes = [tokenRoute];
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"),
+    { "X-Queue-Extension": "850", "X-Excluded-Extensions": "850" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check((await res.json()).filtered === "extension", "call through queue 850 dropped");
 });
 
 // ── Confidential extensions ─────────────────────────────────────────────
@@ -1746,6 +1984,282 @@ await runTest("confidential: unlisted extensions unaffected", async () => {
     { "X-Confidential-Extensions": "300,4*" }), env, ctx);
   await Promise.all(ctx.tasks);
   check(forwardedCallTask().Description.includes("Sarah Jones"), "extension 102 keeps its transcript");
+});
+
+// ── Closed review gaps ──────────────────────────────────────────────────
+// One test per gap found in the September 2026 review, so none can reopen.
+
+const header = (text) => `17/07/2026 15:00: ${text}`;
+// Forwarded URLs keep 3CX's own encoding, so match on the decoded query.
+const urlHas = (r, text) => decodeURIComponent(r.url.replace(/\+/g, "%20")).includes(text);
+
+// G1: words spoken on the call cannot change which extension the privacy rules use
+await runTest("gaps: transcript cannot pose as the call header", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  const description = header("Answered outgoing call from 300 to 447911123456 (00:00:35)") +
+    "\n\nTranscription: she read out Answered incoming call from 447000000000 to 102 (00:00:10) to me" +
+    "\n\nSummary: resident health discussed\n\nSentiment: Neutral\n\nRecording: https://example.com/r.wav";
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", description),
+    { "X-Confidential-Extensions": "300" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  const logged = forwardedCallTask()?.Description || "";
+  check(logged.includes("Content withheld"), "confidential rule applied to the real extension");
+  check(!logged.includes("resident health"), "nothing said on the call reaches Salesforce");
+});
+
+// G2: redaction keeps only the header line when the section headings are missing
+await runTest("gaps: confidential redaction fails closed without headings", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  const description = header("Answered incoming call from 447911123456 to 102 (00:00:35)") +
+    "\nthe caller discussed a resident's medication";
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", description),
+    { "X-Confidential-Extensions": "102" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(!(forwardedCallTask()?.Description || "").includes("medication"), "unlabelled content removed");
+});
+
+// G3: a heading spoken inside the transcript is not taken as the real section
+await runTest("gaps: spoken section heading does not leak the transcript", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  const description = header("Answered incoming call from 447911123456 to 102 (00:00:35)") +
+    "\n\nTranscription: hello\nSummary: private words from the caller" +
+    "\n\nSummary: Real summary\n\nSentiment: Neutral\n\nRecording: https://example.com/r.wav";
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", description),
+    { "X-Transcript-Policy": "Metadata only" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  const logged = forwardedCallTask()?.Description || "";
+  check(logged.includes("Summary: Real summary"), "the real summary is kept");
+  check(!logged.includes("private words"), "the transcript stays withheld");
+});
+
+// G4: an unanswered outbound call to a stamped record is still read as unanswered
+await runTest("gaps: unanswered outbound to a stamped name keeps its direction", async () => {
+  routes = [tokenRoute];
+  const description = header("Unanswered outgoing call from 102 to 447911123456 Unregistered Contact +447911123456 (Inbound 15:04, Ext 102)");
+  const res = await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", description),
+    { "X-Journal-Unanswered": "False" }), env, makeCtx());
+  check((await res.json()).filtered === "direction", "dropped by the Unanswered switch");
+});
+
+// G5: 3CX's [Agent] header wins over the extension parsed from text
+await runTest("gaps: [Agent] header decides the extension", async () => {
+  routes = [tokenRoute];
+  const res = await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"),
+    { "X-Agent-Extension": "300", "X-Excluded-Extensions": "300" }), env, makeCtx());
+  check((await res.json()).filtered === "extension", "excluded on the header's extension");
+});
+
+// G6: the passthrough forwards the template's reads and nothing else
+await runTest("gaps: passthrough forwards queries only", async () => {
+  routes = [tokenRoute, { match: r => r.method === "GET" && urlHas(r, "from User"), reply: { records: [{ Id: "005xx0000012345AAA" }] } }];
+  const ok = await worker.fetch(new Request(
+    `https://worker.example/services/data/v55.0/query/?q=${encodeURIComponent("SELECT Id from User where Email = 'a@b.com' AND IsActive = true LIMIT 1")}`,
+    { headers: { "X-Proxy-API-Key": "secret" } }), env, makeCtx());
+  check(ok.status === 200 && (await ok.json()).records.length === 1, "ReportCall's user query forwarded");
+
+  calls = [];
+  const del = await worker.fetch(new Request("https://worker.example/services/data/v55.0/sobjects/Contact/003RING00000001AAA",
+    { method: "DELETE", headers: { "X-Proxy-API-Key": "secret" } }), env, makeCtx());
+  check(del.status === 403, "DELETE refused");
+  const composite = await worker.fetch(new Request("https://worker.example/services/data/v55.0/composite",
+    { method: "POST", headers: { "X-Proxy-API-Key": "secret" }, body: "{}" }), env, makeCtx());
+  check(composite.status === 403, "other APIs refused");
+  check(!calls.some(c => c.url.startsWith(SF)), "nothing refused reached Salesforce");
+});
+
+// G7: a path starting "//" cannot send the Salesforce token to another host
+await runTest("gaps: double-slash path cannot change the target host", async () => {
+  routes = [tokenRoute];
+  await worker.fetch(new Request(
+    `https://worker.example//evil.example/services/data/v55.0/query/?q=${encodeURIComponent("SELECT Id FROM Contact LIMIT 1")}`,
+    { headers: { "X-Proxy-API-Key": "secret" } }), env, makeCtx());
+  check(!calls.some(c => /^https?:\/\/evil\.example/.test(c.url)), "no request to another host");
+});
+
+// G8: a wrong key is refused, not just a missing one
+await runTest("gaps: wrong proxy key refused", async () => {
+  routes = [tokenRoute];
+  const res = await worker.fetch(new Request("https://worker.example/services/data/v55.0/query/?q=x",
+    { headers: { "X-Proxy-API-Key": "not-the-key" } }), env, makeCtx());
+  check(res.status === 401, "401 for a wrong key");
+});
+
+// G9: an empty Lead search does not hide Contacts for the same term
+await runTest("gaps: type-ahead cache is per query, not per term", async () => {
+  routes = [
+    tokenRoute,
+    { match: r => urlHas(r, "FROM Lead"), reply: { records: [] } },
+    { match: r => urlHas(r, "FROM Contact"), reply: { records: [{ Id: "003ZQX0000000001AA" }] } }
+  ];
+  const ask = (object) => worker.fetch(new Request(
+    `https://worker.example/services/data/v55.0/query/?q=${encodeURIComponent(`SELECT Id FROM ${object} WHERE LastName LIKE '%zqxw%' LIMIT 20`)}`,
+    { headers: { "X-Proxy-API-Key": "secret" } }), env, makeCtx());
+  await ask("Lead");
+  const contacts = await (await ask("Contact")).json();
+  check(contacts.records.length === 1, "Contact results still returned");
+});
+
+// G11: a maintenance write Salesforce rejects raises the failure alert
+await runTest("gaps: rejected maintenance write raises an alert", async () => {
+  routes = [
+    tokenRoute,
+    { match: taskPost, reply: (r, hits) => ({ json: { id: `00TGAP00000000${hits}AA` }, status: 201 }) },
+    { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+    noRecentCall,
+    { match: r => r.method === "GET" && r.url.includes("3CX+Integration+Error"), reply: { records: [] } },
+    { match: byTask, reply: { records: [] } },
+    { match: r => r.method === "PATCH" && r.url.includes("/sobjects/Contact/"), reply: { status: 400, json: [{ errorCode: "FIELD_CUSTOM_VALIDATION_EXCEPTION" }] } },
+    patch204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(!!failureTaskPost(), "error task raised for the rejected write");
+  check(calls.filter(c => c.method === "PATCH").every(c => c.headers.get("Sforce-Auto-Assign") === "FALSE"),
+    "updates never re-run assignment rules");
+});
+
+// G12: a transcript over Salesforce's limit is trimmed, not lost
+await runTest("gaps: oversized call log is trimmed to fit", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  const description = header("Answered incoming call from 447911123456 to 102 (01:00:00)") +
+    `\n\nTranscription: ${"words ".repeat(8000)}\n\nSummary: s\n\nSentiment: n\n\nRecording: r`;
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", description)), env, ctx);
+  await Promise.all(ctx.tasks);
+  const logged = forwardedCallTask()?.Description || "";
+  check(logged.length <= 30000, "within the Description limit");
+  check(logged.startsWith("17/07/2026 15:00"), "call details kept");
+});
+
+// G13: a call log Salesforce refuses for its link is saved unlinked
+await runTest("gaps: refused link retries the call log unlinked", async () => {
+  routes = [
+    tokenRoute,
+    noRecentCall,
+    { match: taskPost, reply: (r, hits) => hits === 1
+        ? { status: 400, json: [{ errorCode: "INVALID_CROSS_REFERENCE_KEY" }] }
+        : { json: { id: "00TGAP0000000013AA" }, status: 201 } }
+  ];
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(callTaskBody("003GONE0000000001AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  const posts = calls.filter(taskPost).map(c => JSON.parse(c.body));
+  check(res.status === 201, "3CX sees the call saved");
+  check(posts.length === 2 && !("WhoId" in posts[1]), "second attempt carried no link");
+});
+
+// G14: a non-JSON call log is refused rather than forwarded unfiltered
+await runTest("gaps: non-JSON call log refused", async () => {
+  routes = [tokenRoute];
+  const res = await worker.fetch(new Request("https://worker.example/services/data/v55.0/sobjects/task",
+    { method: "POST", headers: { "X-Proxy-API-Key": "secret" }, body: "not json" }), env, makeCtx());
+  check(res.status === 400, "400");
+  check(!calls.some(taskPost), "nothing forwarded");
+});
+
+// G15: a converted Lead holding the key sends the call to what it became
+await runTest("gaps: converted Lead routes the call to its converted record", async () => {
+  const leadKeyEnv = { ...leadEnv, SALESFORCE_EXTERNAL_ID_FIELD: "Phone_E164__c" };
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byAccountPhone, reply: { records: [] } },
+    { match: byLeadPhone, reply: { records: [] } },
+    noBusinessContact,
+    { match: r => r.method === "GET" && r.url.includes("/sobjects/Lead/Phone_E164__c/"), reply: { Id: "00QCONV000000001AA" } },
+    { match: r => r.method === "GET" && r.url.includes("FROM+Lead+WHERE+Phone_E164__c"),
+      reply: { records: [{ Id: "00QCONV000000001AA", IsConverted: true, ConvertedContactId: "003CONV000000001AA" }] } },
+    { match: taskPost, reply: { json: { id: "00TGAP0000000015AA" }, status: 201 } },
+    { match: byAccountContactId, reply: { records: [personAccount("001CONV000000001AA", "003CONV000000001AA", "+447911123456", { FirstName: "Jean", LastName: "Smith" })] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" })), leadKeyEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(!calls.some(leadPost), "no second Lead attempted");
+  check(forwardedCallTask()?.WhoId === "003CONV000000001AA", "call linked to the converted record");
+});
+
+// G16: a professional already on file as a business Contact is not raised as an enquiry
+await runTest("gaps: business Contact matched before creating a Lead", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byAccountPhone, reply: { records: [] } },
+    { match: byLeadPhone, reply: { records: [] } },
+    { match: byBusinessContact, reply: { records: [{ Id: "003BIZ0000000001AA", FirstName: "Jo", LastName: "Social" }] } },
+    { match: taskPost, reply: { json: { id: "00TGAP0000000016AA" }, status: 201 } },
+    { match: byAccountContactId, reply: { records: [] } },
+    { match: byId, reply: { records: [{ Id: "003BIZ0000000001AA", FirstName: "Jo", LastName: "Social", IsPersonAccount: false }] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" })), leadEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(!calls.some(leadPost), "no Lead created");
+  check(forwardedCallTask()?.WhoId === "003BIZ0000000001AA", "call linked to the Contact");
+});
+
+// G17: a duplicate rule blocking the insert adopts the record it matched
+await runTest("gaps: duplicate-rule block adopts the existing record", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [ringTimeContact("003DUP0000000001AA", "+447911123456")] } },
+    { match: contactPost, reply: { status: 400, json: [{ errorCode: "DUPLICATES_DETECTED" }] } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)"), env, makeCtx());
+  check((await res.json()).searchRecords?.[0]?.Id === "003DUP0000000001AA", "existing record used");
+});
+
+// G18: a new enquiry is named after the home, from the 3CX department
+await runTest("gaps: enquiry named home first from 3CX departments", async () => {
+  const pbxEnv = { ...env, THREECX_URL: "https://pbx.example", THREECX_CLIENT_ID: "900", THREECX_CLIENT_SECRET: "s" };
+  const pbx = p => r => r.url.startsWith(`https://pbx.example${p}`);
+  routes = [
+    tokenRoute,
+    { match: pbx("/connect/token"), reply: { access_token: "pbx" } },
+    { match: pbx("/xapi/v1/Groups"), reply: { value: [{ Id: 1, Name: "DEFAULT", IsDefault: true }, { Id: 7, Name: "Arbour Walk", IsDefault: false }] } },
+    { match: pbx("/xapi/v1/Users"), reply: { value: [{ Number: "102", Groups: [{ GroupId: 1 }, { GroupId: 7 }] }] } },
+    { match: pbx("/xapi/v1/Queues"), reply: { value: [{ Number: "800", Groups: [{ GroupId: 7 }] }] } },
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003HOME000000001AA", FirstName: "Arbour Walk", LastName: "Enquiry +447911123456 (17 Jul 15:00)" }] } },
+    { match: contactPost, reply: { json: { id: "003HOME000000001AA" }, status: 201 } },
+    { match: taskPost, reply: { json: { id: "00TGAP0000000018AA" }, status: 201 } },
+    { match: byId, reply: { records: [{ Id: "003HOME000000001AA", FirstName: "Arbour Walk", LastName: "Enquiry +447911123456 (17 Jul 15:00)", Phone: "+447911123456" }] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" })), pbxEnv, ctx);
+  await Promise.all(ctx.tasks);
+  const created = JSON.parse(contactPosts()[0]?.body || "{}");
+  check(created.FirstName === "Arbour Walk", "first name is the home");
+  check(/^Enquiry \+447911123456 \(\d{1,2} [A-Z][a-z]{2} 15:00\)$/.test(created.LastName || ""), `last name is Enquiry, the number and the call time (got ${created.LastName})`);
+  check(!!alertTaskPost(), "still unregistered, so a reminder is raised");
+  check(!contactPatches().some(p => p.body.LastName), "not renamed after creation");
+});
+
+// G10 (last, since it sets the External ID aside for the rest of the run):
+// a missing or hidden key field degrades to phone matching instead of stopping creation
+await runTest("gaps: broken External ID field falls back to phone matching", async () => {
+  const brokenKeyEnv = { ...env, SALESFORCE_EXTERNAL_ID_FIELD: "Phone_E164__c" };
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: r => r.method === "GET" && r.url.includes("Phone_E164__c"),
+      reply: { status: 400, json: [{ errorCode: "INVALID_FIELD", message: "No such column 'Phone_E164__c' on entity 'Contact'." }] } },
+    { match: byPhone, reply: (r, hits) => hits === 1 ? { records: [] } : { records: [{ Id: "003KEY0000000001AA", Phone: "+447911123456" }] } },
+    { match: contactPost, reply: { json: { id: "003KEY0000000001AA" }, status: 201 } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)"), brokenKeyEnv, makeCtx());
+  check((await res.json()).searchRecords?.[0]?.Id === "003KEY0000000001AA", "record still created and returned");
+  check(!JSON.parse(contactPosts()[0]?.body || "{}").Phone_E164__c, "created without the unusable field");
 });
 
 // ═════════════════════════════════════════════════════════════════════════

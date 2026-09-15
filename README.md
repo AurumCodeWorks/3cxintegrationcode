@@ -3,7 +3,7 @@
 A Cloudflare Worker that sits between a 3CX phone system and Salesforce so that **calls from numbers that aren't in the CRM still get logged**, with their AI transcription, against a real Salesforce record — without creating duplicates.
 
 - **Worker:** `3cx-salesforce-proxy-cedarcare` -> https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev
-- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v45)
+- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v50)
 - **Salesforce API:** v55.0, OAuth 2.0 client-credentials flow
 
 ---
@@ -17,6 +17,37 @@ This proxy intercepts the lookup, creates the missing record in Salesforce in re
 ---
 
 ## How the flow works
+
+### Tracked queues (template v46)
+
+Only calls **answered through a tracked queue** create a record for an unknown caller: New Care Enquiries for the homes, and the Placement Team at head office. List their queue extensions in the template's **Tracked Queues** setting. **Excluded Extensions** still applies on top and always wins: nothing on an excluded extension or queue reaches Salesforce.
+
+3CX cannot tell a lookup which queue a call is on. The queue arrives only with the call journal, as `[QueueExtension]`. So with Tracked Queues in use:
+
+| Call | What happens |
+|---|---|
+| Unknown caller, answered through a tracked queue | The lookup returns a **New Caller** stand-in. When the call is journaled, the Worker creates the record, named after the home, and links the call to it |
+| Unknown caller, any other route, or nobody answered | The stand-in is dropped at journaling. No record, no call log |
+| Unknown number, outbound | Nothing is returned, so nothing is logged |
+| Someone who already has a record, any route | Logged against that record while **Always Log Calls For Existing Records** is on (the default) |
+| The same, with Always Log off | Logged only through a tracked queue, plus later legs of a tracked call (a transfer) |
+| Salesforce down during a tracked call | The call log is kept, unlinked, rather than lost |
+
+The trade-off is that a brand new caller shows as **New Caller** during the first call, and the (CRM) link opens the Leads list rather than a record, because the record is only created when the call ends. From the second call on they match normally.
+
+A new enquiry is named home first, so a list sorted by name groups by home. The home is the 3CX department the tracked queue belongs to:
+
+| First name | Last name |
+|---|---|
+| Arbour Walk | Enquiry +447700900321 (15 Sep 10:17) |
+
+A person replaces both once they know who called. Until then the record counts as unregistered and keeps its reminder. Without the 3CX API configured, the first name is `Phone`.
+
+A caller who is already a Contact under a business Account (a social worker, a hospital discharge team) is logged against that Contact rather than raised as an enquiry.
+
+Office hours are gone. Out-of-hours calls are redirected by the PBX to an answering service, so the Worker never sees them.
+
+The sections below describe what happens once a call qualifies. A template older than v46 sends none of these headers and keeps the previous behaviour, creating the record at ring time.
 
 ### 1. The phone rings — lookup
 
@@ -66,13 +97,13 @@ The lookup now matches the existing record, so nothing is created. The second tr
 
 ### 4. Someone fills in the details
 
-Once a human gives the record a real name, the Worker detects the markers are gone, **auto-completes leftover reminders**, and stops touching the record.
+Once a human gives the record a real name, the next call from that number finds the markers gone, **auto-completes leftover reminders**, and stops touching the record. Reminders close on that next call, not the moment the record is edited.
 
 ---
 
 ## Org models
 
-Set `SALESFORCE_ORG_MODEL` in the Cloudflare dashboard.
+Set `SALESFORCE_ORG_MODEL` in [wrangler.toml](wrangler.toml). It defines which records the Worker writes, so it is deployed with the code rather than edited in the dashboard.
 
 | Mode | Unknown caller becomes | Matching order | Task linked to |
 |---|---|---|---|
@@ -94,7 +125,7 @@ Three systems to configure, in this order. Salesforce first because Cloudflare n
 
 ### Step 1 — Salesforce
 
-**1a. Create the Connected App** (Setup → App Manager → New Connected App → Create an API Integration)
+**1a. Create the Connected App** (Setup → App Manager → New Connected App → Create an API Integration). Orgs on Salesforce's Spring '26 release or later no longer allow new Connected Apps: create an **External Client App** instead, with the same OAuth settings.
 
 - Enable OAuth Settings
 - Callback URL: anything valid, e.g. `https://login.salesforce.com/services/oauth2/callback` (the client credentials flow never uses it)
@@ -104,7 +135,7 @@ Three systems to configure, in this order. Salesforce first because Cloudflare n
 
 **1b. Set the run-as user** (App Manager → your app → Manage → Edit Policies → Client Credentials Flow)
 
-Pick the user the integration acts as. Every record it creates will be owned by them, so use a dedicated integration user rather than a person who might leave. That user needs Create/Read/Edit on **Contact, Lead, Account and Task**, and Read on **RecordType**.
+Pick the user the integration acts as. Every record it creates will be owned by them, so use a dedicated integration user rather than a person who might leave. [SALESFORCE-PERMISSIONS.md](SALESFORCE-PERMISSIONS.md) lists every object and field it needs.
 
 > Without a run-as user set, the token request fails with `invalid_grant`. This is the single most common setup failure.
 
@@ -118,19 +149,21 @@ Pick the user the integration acts as. Every record it creates will be owned by 
 
 ### Step 2 — Cloudflare
 
+**For a new org, edit [wrangler.toml](wrangler.toml) first.** Change `name` to a new Worker name, and set `SALESFORCE_LOGIN_URL`, `SALESFORCE_ORG_MODEL` and `SALESFORCE_EXTERNAL_ID_FIELD` for that org. Deploying without changing `name` overwrites the existing Cedar Care Worker.
+
 ```bash
 npm install
 npx wrangler login          # once per machine
 npm run deploy              # runs the test suite, then deploys
 ```
 
-Then set the configuration in the dashboard (Workers & Pages → your worker → Settings → Variables and Secrets). `keep_vars = true` in [wrangler.toml](wrangler.toml) stops later deploys wiping these, so they are edited in the dashboard and never in code.
+The values in `wrangler.toml` are deployed with the code. Everything else is set in the dashboard (Workers & Pages → your worker → Settings → Variables and Secrets), and `keep_vars = true` stops later deploys wiping those.
 
 Minimum to work at all:
 
 | Name | Type | Value |
 |---|---|---|
-| `SALESFORCE_LOGIN_URL` | var | Your My Domain URL from step 1c |
+| `SALESFORCE_LOGIN_URL` | wrangler.toml | Your My Domain URL from step 1c |
 | `SALESFORCE_CLIENT_ID` | secret | Consumer Key from step 1a |
 | `SALESFORCE_CLIENT_SECRET` | secret | Consumer Secret from step 1a |
 | `PROXY_API_KEY` | secret | A long random string you generate. 3CX must send the same value |
@@ -144,7 +177,7 @@ npx wrangler secret put PROXY_API_KEY    # paste the value when prompted
 
 > **Record the value somewhere before you paste it.** Cloudflare stores secrets write-only: `wrangler secret list` returns names and types only, and the dashboard cannot reveal them either. If the key is lost, the only route is to set a new one and update the Proxy API Key in **every** 3CX PBX pointing at this Worker, which locks out any you forget until you do.
 
-Then set `SALESFORCE_ORG_MODEL` to match the org, and anything else from the [full config reference](#cloudflare-variables). Variable changes take effect immediately with no redeploy.
+Then set anything else from the [full config reference](#cloudflare-variables). Dashboard variable changes take effect immediately with no redeploy.
 
 Note the deployed Worker URL, e.g. `https://3cx-salesforce-proxy.<subdomain>.workers.dev`.
 
@@ -163,6 +196,8 @@ Then fill in, at minimum:
 Everything else has a working default. Review [the 3CX settings table](#3cx-settings) for filtering, auto-create policy and transcript handling.
 
 > **Password fields usually come back blank after an upload.** Re-paste the Proxy API Key and save again, otherwise every request returns 401. Re-upload the XML whenever the template version changes, and re-paste the key each time.
+>
+> **3CX can keep saved values across a re-upload.** After uploading, check each setting shows what you expect, especially any whose meaning changed between versions.
 
 ### Reusing this Worker for another 3CX
 
@@ -182,14 +217,18 @@ Open a log stream, then make one real call from a number that is not in Salesfor
 npm run tail
 ```
 
-What a healthy first call looks like:
+What a healthy first call through a tracked queue looks like:
 
-1. A lookup arrives and logs `Created Contact 003… at ring time` (or `Upserted …` if you added the External ID field)
-2. The agent's phone shows the caller as a CRM match, and the (CRM) link opens an editable record
-3. At the end of the call, a task POST journals the transcription against that record
-4. `Maintaining Contact 003…: appending call and upserting reminder`
+1. The agent's phone shows the caller as **New Caller**
+2. At the end of the call the task POST logs `Tracked queues (queue 800, extension 102): created Lead 00Q…`
+3. `Maintaining Lead 00Q…: appending call and upserting reminder`
 
-Then call again from the same number and confirm **no second record** is created and **no second reminder** is raised.
+Then check the other routes:
+
+- Call again from the same number and confirm **no second record** is created and **no second reminder** is raised
+- Call a home's main line from an unknown number and confirm the log says `unknown caller not answered through a tracked queue, dropped`
+
+If step 2 shows `queue none` on a call that did come through the queue, 3CX is not filling in `[QueueExtension]` for that route, and nothing will be created until it does.
 
 If any of that misbehaves, [Troubleshooting](#troubleshooting) covers the usual causes.
 
@@ -199,27 +238,27 @@ If any of that misbehaves, [Troubleshooting](#troubleshooting) covers the usual 
 
 ### Cloudflare variables
 
-*Dashboard → Workers & Pages → your worker → Settings → Variables and Secrets*
-
-All config lives here, not in `wrangler.toml` (`keep_vars = true` stops deploys overwriting it).
+*Dashboard → Workers & Pages → your worker → Settings → Variables and Secrets*, except the three marked **wrangler.toml**, which are deployed with the code. `keep_vars = true` stops a deploy wiping the dashboard values.
 
 | Name | Type | Purpose |
 |---|---|---|
-| `SALESFORCE_LOGIN_URL` | var | Your Salesforce instance / My Domain URL |
-| `SALESFORCE_ORG_MODEL` | var | `contact` \| `personaccount` \| `lead` (default `contact`) |
+| `SALESFORCE_LOGIN_URL` | wrangler.toml | Your Salesforce instance / My Domain URL |
+| `SALESFORCE_ORG_MODEL` | wrangler.toml | `contact` \| `personaccount` \| `lead` (default `contact`) |
 | `SALESFORCE_EXTRA_FIELDS` | var | JSON of extra fields per object, e.g. `{"Lead":{"LeadSource":"3CX"}}` |
 | `HOME_COUNTRY` | var | ISO country for reading national-format numbers (default `GB`) |
 | `MIN_SEARCH_LENGTH` | var | Type-ahead searches shorter than this are answered locally (default `3`) |
 | `CALL_MERGE_WINDOW_MINUTES` | var | Transferred-leg consolidation window (default `5`, `0` disables) |
-| `EXTENSION_DEPARTMENTS` | var | JSON map of extension or prefix to site name, e.g. `{"03":"Arbour Walk"}`. Longest prefix wins |
-| `SYSTEM_EXTENSIONS` | var | Fallback only. Set **Auto Attendant / Queue Extensions** in the 3CX template instead |
-| `SALESFORCE_EXTERNAL_ID_FIELD` | var | Unique External ID field holding the E.164 number, e.g. `Phone_E164__c`. Makes dedup structural (see below) |
-| `ALERT_WEBHOOK_URL` | var | Optional. Background failures are POSTed here as JSON (Slack, Teams, Zapier) |
+| `THREECX_URL` | var | The PBX's web address, e.g. `https://cedarcare.3cx.co.uk`. With the two secrets below, home names are read from 3CX departments |
+| `THREECX_CLIENT_ID` | secret | Client ID of the 3CX API client (Admin → Integrations → API, with Configuration API access and the System Admin role) |
+| `THREECX_CLIENT_SECRET` | secret | That API client's secret, shown once when it is created |
+| `EXTENSION_DEPARTMENTS` | var | Fallback only, when the 3CX API is not configured: JSON map of extension or prefix to home name, e.g. `{"03":"Arbour Walk"}`. Longest prefix wins |
+| `SALESFORCE_EXTERNAL_ID_FIELD` | wrangler.toml | Unique External ID field holding the E.164 number, e.g. `Phone_E164__c`. Makes dedup structural (see below) |
+| `ALERT_WEBHOOK_URL` | secret | Optional. Background failures are POSTed here as JSON (Slack, Teams, Zapier). A webhook address lets anyone post to that channel, so store it as a secret |
 | `PROXY_API_KEY` | secret | Shared key 3CX must send as `X-Proxy-API-Key` |
 | `SALESFORCE_CLIENT_ID` | secret | Connected App consumer key |
 | `SALESFORCE_CLIENT_SECRET` | secret | Connected App consumer secret |
 
-Variable changes apply immediately — **no redeploy needed**.
+Dashboard changes apply immediately — **no redeploy needed**. Home names are re-read from 3CX at most hourly.
 
 ### 3CX settings
 
@@ -229,15 +268,15 @@ Variable changes apply immediately — **no redeploy needed**.
 |---|---|
 | Cloudflare Worker URL | Points 3CX at this proxy |
 | Proxy API Key | Must match `PROXY_API_KEY` |
-| Auto-Create Unsaved Contacts | `Always On` / `After-Hours Only` / `Disabled` |
-| Office Opens / Closes | Only used by `After-Hours Only` |
+| Tracked Queues | CSV of queue extensions, e.g. `800, 801` or `80*`. Only calls answered through these create a record for an unknown caller. Blank means nothing is ever created |
+| Excluded Extensions | CSV of extensions or queues, `*` for prefix. Nothing about these calls reaches Salesforce, and it overrides Tracked Queues and Always Log |
+| Always Log Calls For Existing Records | On (default): calls from people already in Salesforce are logged whatever the route. Off: only through a tracked queue |
 | Log Answered Inbound / Missed / Answered Outbound / Unanswered Outbound | Per-direction on/off |
 | Internal Extension Max Digits | Numbers this short are internal — never reach Salesforce (default 6) |
-| Excluded Number Prefixes | CSV, e.g. `0117, 0161` — sister sites, internal DDIs |
+| Excluded Number Prefixes | CSV of your own numbers, e.g. `+441632960001, +4416329600`. Each entry matches every number starting with it, so use whole numbers or tight blocks (the second example covers ten numbers): an area code such as `0117` would drop every caller in that city. Up to 1,000 characters |
 | Confidential Extensions | CSV, e.g. `3020, 4*`. The call is logged; transcript, summary, sentiment and recording link are not |
-| Excluded Extensions | CSV. Nothing about these calls reaches Salesforce at all |
-| System Extensions | CSV of receptionists, queues and ring groups, e.g. `1001, 1002, GRP*`. A trailing `*` matches a prefix. Their legs become one line and never name the record |
-| Store Call Transcripts | `Include full transcript` / `Metadata only` / `External inbound only` |
+| Receptionist Extensions | CSV of digital receptionist and ring group extensions, e.g. `1001, 10*`. Their legs become one line, never name the record, and never count as someone answering a tracked queue. Tracked Queues count automatically |
+| Store Call Transcripts | `Include full transcript` / `Metadata only` / `External inbound only`. `Metadata only` removes the transcript and recording link but still stores 3CX's AI summary and sentiment; use Confidential Extensions where those must go too |
 
 ---
 
@@ -247,7 +286,7 @@ By default, duplicate prevention is *query-then-create with race convergence*: t
 
 Create a **unique External ID** field on Contact / Lead / Account (e.g. `Phone_E164__c`, text, External ID, Unique) and set `SALESFORCE_EXTERNAL_ID_FIELD` to its API name. Creation then becomes a Salesforce **upsert keyed on that field**, and duplicates become impossible at database level — two simultaneous calls from one number cannot both insert, because Salesforce itself refuses the second.
 
-If the field name is wrong or missing, the Worker logs the rejection and falls back to create-then-converge, so a typo degrades the guarantee rather than stopping records being created.
+If the field is missing, misspelt or hidden from the integration user, the Worker logs it once and falls back to matching on the phone fields with create-then-converge until it restarts. A misconfigured field degrades the guarantee rather than stopping records being created.
 
 ### When background work fails
 
@@ -261,7 +300,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 
 ## What it can do
 
-- Create a real, editable CRM record the moment an unknown number rings
+- Create a record only for enquiries answered through a tracked queue, named after the home they came in on
 - Log transcription, summary, sentiment and recording link against that record
 - Handle all four call outcomes — answered inbound, missed, answered outbound, unanswered outbound
 - Prevent duplicates: exact-match phone lookup, plus race convergence if two calls land simultaneously
@@ -277,6 +316,8 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 - Survive Salesforce outages without creating duplicates or losing the call log
 - Raise a visible alert when background enrichment fails, instead of failing silently
 - Refresh an expired OAuth token automatically and retry
+- Forward only the queries and searches the 3CX template makes, so the proxy key cannot delete records or reach any other Salesforce API
+- Keep a call log Salesforce refuses for its link, by saving it unlinked and raising an alert
 - Write custom fields via config, without a code change
 
 ## What it cannot do
@@ -300,7 +341,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                           # 268 checks — no network, no credentials needed
+npm test                           # 334 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions
@@ -315,7 +356,7 @@ The test harness mocks the Salesforce REST API and drives the Worker's `fetch` h
 | [src/index.js](src/index.js) | The entire Worker |
 | [test/worker.test.mjs](test/worker.test.mjs) | Offline test suite |
 | [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) | 3CX CRM template — upload in 3CX Admin |
-| [wrangler.toml](wrangler.toml) | Deploy config only; all values live in the dashboard |
+| [wrangler.toml](wrangler.toml) | Worker name and the values that define which org it writes to |
 | [3CX-PBX-SETUP.md](3CX-PBX-SETUP.md) | Configuring the phone system itself: trunk, outbound rules, emergency numbers, inbound routing |
 | [SALESFORCE-PERMISSIONS.md](SALESFORCE-PERMISSIONS.md) | Every object, field and record-type permission the integration user needs |
 | [ddi-list.csv](ddi-list.csv) | The 52 Cedar Care DDIs with area, and blank columns for site and destination |
@@ -333,7 +374,10 @@ The test harness mocks the Salesforce REST API and drives the Worker's `fetch` h
 | `MALFORMED_SEARCH … Bind variables only allowed in Apex` | A `+` reached a SOSL `FIND`. Phone searches must use digits only — `+` is reserved in SOSL. |
 | Number arrives truncated (e.g. `3178055`) | The template's `<Number MaxLength="">` was set to `[MaxLength]`, which truncates to the PBX contact-match length. Must be empty. |
 | `401 Unauthorized` from the proxy | 3CX's Proxy API Key doesn't match `PROXY_API_KEY`. |
-| Records created for test/spam calls | Expected — a record is created whenever an unknown number rings. Use the exclusion list, or set Auto-Create to `After-Hours Only` / `Disabled`. |
+| `403 Forbidden` from the proxy | The request is not one the 3CX template makes. The proxy only forwards SOQL queries, SOSL searches and call logs. |
+| Enquiries named `Phone Enquiry …` instead of a home | The 3CX API is not configured or not reachable, or the queue is not in a department. `wrangler tail` shows `Could not read home names from 3CX`. |
+| No record for a genuine enquiry | The call did not come through a tracked queue, or nobody answered. Check the queue extension is in Tracked Queues, and look for `queue none` in `wrangler tail`. |
+| Agent sees "New Caller" | Expected on a first call from an unknown number. The record is created when the call ends, if it came through a tracked queue. |
 | Nothing created and no task logged | The number matched a filter (internal length or excluded prefix). `wrangler tail` logs every filter decision. |
 | Duplicate contacts appearing | Check `SALESFORCE_ORG_MODEL` matches the org — Contact mode against a Person Account org creates the wrong object type. |
 | Salesforce rejects record creation | Usually a validation rule, duplicate rule, or a required custom field. `wrangler tail` shows the exact Salesforce error. |

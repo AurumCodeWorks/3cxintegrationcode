@@ -17,11 +17,12 @@ Only the objects for your `SALESFORCE_ORG_MODEL` are strictly required, but gran
 | **Contact** | ✅ | ✅ | ✅ | ✅ | Lookup, dedup, ring-time creation, transcript append |
 | **Account** | ✅ | ✅ | ✅ | ✅ | Person Accounts in `personaccount` and `lead` modes |
 | **Lead** | ✅ | ✅ | ✅ | ✅ | `lead` mode, and the template's own Lead lookup |
-| **Task** | ✅ | ✅ | ✅ | | Call logs, reminder upsert, transferred-leg merge |
+| **Task** | ✅ | ✅ | ✅ | ✅ | Call logs, reminder upsert, transferred-leg merge |
+| **User** | ✅ | | | | 3CX's own lookup of the answering agent by email, to set the call's owner |
 
 **Delete is genuinely needed.** When two calls from one number arrive simultaneously, both create a record and the Worker deletes its own loser so a single record survives. Without Delete the convergence fails and you get the duplicate it exists to prevent.
 
-Task needs no Delete. Reminders are completed, never removed.
+Task needs Delete for the same reason: two simultaneous calls can each raise a reminder, and the Worker deletes its own extra one.
 
 ---
 
@@ -62,7 +63,8 @@ The four phone fields beyond `Phone` are all matched against when identifying a 
 |---|---|
 | FirstName, LastName | Read + **Edit** |
 | Phone, Description | Read + **Edit** |
-| MobilePhone, Email, Title, Fax, Company, IsConverted | Read |
+| Phone_E164__c *(if used as External ID)* | Read + **Edit** |
+| MobilePhone, Email, Title, Fax, Company, IsConverted, ConvertedContactId | Read |
 
 `Company` must be **writable and not required**, because a Lead with a blank Company is what converts into a Person Account rather than a business Account plus Contact.
 
@@ -73,7 +75,7 @@ The four phone fields beyond `Phone` are all matched against when identifying a 
 | Subject, Status, Priority, TaskSubtype | Read + **Edit** |
 | ActivityDate, Description, WhoId, WhatId, OwnerId | Read + **Edit** |
 | CallDurationInSeconds, CallType | Read + **Edit** |
-| IsClosed, CreatedDate | Read |
+| IsClosed, CreatedDate, LastModifiedDate, CreatedById | Read |
 
 ---
 

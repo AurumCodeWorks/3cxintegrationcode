@@ -1,8 +1,8 @@
 {
   "name": "3cx-cloudflare-integration",
   "version": "1.0.0",
-  "description": "A Cloudflare Worker that sits between a 3CX phone system and Salesforce so that **calls from numbers that aren't in the CRM still get logged**, with their AI transcription, against a real Salesforce record — without creating duplicates.",
-  "main": "index.js",
+  "description": "Cloudflare Worker between a 3CX phone system and Salesforce: logs calls from tracked queues against real records without duplicates.",
+  "main": "src/index.js",
   "directories": {
     "test": "test"
   },
@@ -16,5 +16,9 @@
   "license": "ISC",
   "dependencies": {
     "libphonenumber-js": "^1.13.9"
-  }
+  },
+  "devDependencies": {
+    "wrangler": "^4.131.2"
+  },
+  "type": "module"
 }

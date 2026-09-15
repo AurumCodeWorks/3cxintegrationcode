@@ -11,30 +11,39 @@ compatibility_date = "2024-03-01"
 # 2026-09-08: two near-identical URLs caused a live misconfiguration, and
 # pointing at the wrong one fails silently by writing calls into the wrong org.
 
-# These define which org this Worker talks to, so they live in code where they
-# are reviewable. Editing them in the dashboard is reverted by the next deploy.
-[vars]
-SALESFORCE_LOGIN_URL = "https://cedarcarehomes--uat.sandbox.my.salesforce.com"
-SALESFORCE_ORG_MODEL = "personaccount"
-# Unique External ID on Account, Contact and Lead, backfilled across every
-# Person Account. Makes duplicates impossible at database level, and gives
-# Cedar Care's duplicate rule a number to match on rather than a name.
-SALESFORCE_EXTERNAL_ID_FIELD = "Phone_E164__c"
-
-# Everything else stays dashboard-managed so it can be changed without a
-# deploy. keep_vars stops a deploy wiping those values.
+# Everything not listed under [vars] stays dashboard-managed so it can be
+# changed without a deploy. keep_vars stops a deploy wiping those values. It
+# must sit above [vars]: below it, TOML reads it as a variable named keep_vars
+# and every deploy wipes the dashboard values.
 #   - SALESFORCE_EXTRA_FIELDS      (JSON per object type)
 #   - HOME_COUNTRY                 (default GB)
 #   - MIN_SEARCH_LENGTH            (default 3)
 #   - CALL_MERGE_WINDOW_MINUTES    (default 5, 0 disables)
-#   - ALERT_WEBHOOK_URL            (optional failure alerts)
+#   - THREECX_URL                  (PBX web address; home names from 3CX departments)
+#   - THREECX_CLIENT_ID            (secret, 3CX API client)
+#   - THREECX_CLIENT_SECRET        (secret, 3CX API client)
+#   - EXTENSION_DEPARTMENTS        (fallback home-name map when the 3CX API is not set)
+#   - ALERT_WEBHOOK_URL            (secret, optional failure alerts)
 #   - PROXY_API_KEY                (secret)
 #   - SALESFORCE_CLIENT_ID         (secret)
 #   - SALESFORCE_CLIENT_SECRET     (secret)
 keep_vars = true
 
 # Moving to Cedar Care's PRODUCTION org is a config change, not a deployment:
-# update SALESFORCE_LOGIN_URL above and re-set the two Connected App secrets
-#   npx wrangler secret put SALESFORCE_CLIENT_ID
-#   npx wrangler secret put SALESFORCE_CLIENT_SECRET
+# update SALESFORCE_LOGIN_URL below and re-set the two Connected App secrets.
+# Each "secret put" goes live on its own, so set both in one go to avoid a
+# window where the URL and credentials belong to different orgs:
+#   npx wrangler secret bulk secrets.json   (then delete secrets.json)
 # The 3CX template, the Worker URL and the Proxy API Key all stay as they are.
+
+# These define which org this Worker talks to, so they live in code where they
+# are reviewable. Editing them in the dashboard is reverted by the next deploy.
+[vars]
+SALESFORCE_LOGIN_URL = "https://cedarcarehomes--uat.sandbox.my.salesforce.com"
+# Lead-first: an unknown caller answered through a tracked queue becomes a
+# Lead, and once someone converts it, later calls match the Person Account.
+SALESFORCE_ORG_MODEL = "lead"
+# Unique External ID on Account, Contact and Lead, backfilled across every
+# Person Account. Makes duplicates impossible at database level, and gives
+# Cedar Care's duplicate rule a number to match on rather than a name.
+SALESFORCE_EXTERNAL_ID_FIELD = "Phone_E164__c"
