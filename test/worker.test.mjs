@@ -3147,6 +3147,28 @@ await runTest("toggles: diagnostic logs are kept and can be downloaded", async (
 
   const refused = await worker.fetch(new Request("https://worker.example/logs.txt"), keepingEnv, makeCtx());
   check(refused.status === 401, "and never without the key");
+
+  // The template's own download key, which is what makes it openable in a
+  // browser: a browser cannot send a header.
+  routes = enquiryRoutes(created201);
+  const learn = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn),
+    toggles({ "X-Log-Download-Key": "open sesame" })), keepingEnv, learn);
+  await Promise.all(learn.tasks);
+  check(store.get("config:log-download-key")?.value === "open sesame", "the key is learned from the template");
+
+  const inBrowser = await worker.fetch(
+    new Request("https://worker.example/logs.txt?key=open%20sesame"), keepingEnv, makeCtx());
+  check(inBrowser.status === 200, "opens with the download key in the URL");
+
+  const wrong = await worker.fetch(
+    new Request("https://worker.example/logs.txt?key=guess"), keepingEnv, makeCtx());
+  check(wrong.status === 401, "a wrong key is refused");
+
+  // The proxy key writes to Salesforce, so it is never accepted from a URL.
+  const masterInUrl = await worker.fetch(
+    new Request("https://worker.example/logs.txt?key=secret"), keepingEnv, makeCtx());
+  check(masterInUrl.status === 401, "the proxy key is not accepted in the query string");
 });
 
 // W7: diagnostic logging says what the template sent and what was decided,
@@ -3300,7 +3322,10 @@ await runTest("template: every parameter is one 3CX will render", async () => {
   // Every setting must actually reach the Worker, and every placeholder the
   // headers use must be a real setting.
   const sent = new Set([...templateXml.matchAll(/<Value Key="(X-[A-Za-z-]+)">\[([A-Za-z]+)\]<\/Value>/g)].map(m => m[2]));
-  const journalingText = new Set(["Subject", "InboundCallText", "MissedCallText", "OutboundCallText", "NotAnsweredOutboundCallText", "ReportCallEnabled", "WorkerUrl", "LookupOrder"]);
+  // Settings 3CX itself acts on, or that are only shown to whoever is
+  // reading the page, rather than being sent to the Worker.
+  const journalingText = new Set(["Subject", "InboundCallText", "MissedCallText", "OutboundCallText", "NotAnsweredOutboundCallText",
+    "ReportCallEnabled", "WorkerUrl", "LookupOrder", "LogDownloadLink"]);
   const unsent = params.filter(p => !sent.has(p.name) && !journalingText.has(p.name));
   check(unsent.length === 0, `every setting is sent to the Worker (missing: ${unsent.map(p => p.name).join(", ") || "none"})`);
   // 3CX substitutes these itself; they are not settings on the page.

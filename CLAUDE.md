@@ -32,7 +32,7 @@ Everything user-facing is documented in [README.md](README.md). This file is abo
 ## Commands
 
 ```bash
-npm test                       # 531 offline checks, no network or credentials
+npm test                       # 536 offline checks, no network or credentials
 npm run deploy                 # runs the tests, then deploys
 npm run tail                   # live Worker logs, including every filter decision
 npx wrangler deploy --dry-run --outdir dist    # bundle check only
@@ -112,6 +112,6 @@ Also from that week: a deploy was made with `keep_vars` sitting below `[vars]`, 
 ## State, as of 20 September 2026
 
 - Live on **UAT only**. Production cutover is a URL change plus new secrets, and is waiting on Cedar Care.
-- Template is at version 54 in this repo. Contact and Lead lookups were narrowed to `Phone` and `MobilePhone` because the org hides `HomePhone`, `OtherPhone`, `AssistantPhone`, `Fax`, `Title` and `Department`, and one hidden field fails the whole lookup.
+- Template is at version 55 in this repo. Contact and Lead lookups were narrowed to `Phone` and `MobilePhone` because the org hides `HomePhone`, `OtherPhone`, `AssistantPhone`, `Fax`, `Title` and `Department`, and one hidden field fails the whole lookup.
 - Waiting on Cedar Care: the `Care_Home__c` field type and values, the Lead Source mapping, the production key and secret, their duplicate rule review, and who the fallback owner should be.
 - Known gap: a caller whose number was typed in an unusual format (`07393 178 055`) is not matched, so they can get a second Lead. Fixing it means a SOSL phone search before creating a record.

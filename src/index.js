@@ -317,6 +317,55 @@ async function storeDiagnosticLog(env) {
  * proxy key as everything else, so it is fetched with a command rather than
  * a browser link: a key in a URL ends up in history, bookmarks and logs.
  */
+// Where the template's log download key is kept, so a browser request can be
+// checked against it. The Worker is stateless, and only learns the key when
+// 3CX sends it on a call.
+const DOWNLOAD_KEY_RECORD = "config:log-download-key";
+let downloadKeyWrittenAt = 0;
+const DOWNLOAD_KEY_REFRESH_MS = 10 * 60_000;
+
+/**
+ * Notes the template's current log download key, at most every ten minutes.
+ * Changing it in 3CX therefore takes effect on the next call, not instantly.
+ */
+async function rememberDownloadKey(env, headers) {
+  const key = (headers && headers.get ? headers.get("X-Log-Download-Key") : "") || "";
+  const value = key.trim();
+  if (!value || value.startsWith("[") || !env.DIAGNOSTIC_LOGS) return;
+  if (Date.now() - downloadKeyWrittenAt < DOWNLOAD_KEY_REFRESH_MS) return;
+
+  downloadKeyWrittenAt = Date.now();
+  try {
+    await env.DIAGNOSTIC_LOGS.put(DOWNLOAD_KEY_RECORD, value);
+  } catch (e) {
+    console.error("Could not store the log download key:", e.message);
+  }
+}
+
+/**
+ * The log file, for the proxy key sent as a header, or for the template's
+ * separate log download key in the query string, which is what makes it
+ * openable in a browser.
+ *
+ * The main proxy key is deliberately NOT accepted in the query string: it
+ * writes to Salesforce, and a URL ends up in history, bookmarks and
+ * screenshots. The download key only reads a log of masked numbers and
+ * decisions, and changing it in 3CX revokes the old one.
+ */
+async function handleLogDownload(env, request, requestUrl) {
+  const header = request.headers.get("X-Proxy-API-Key") || "";
+  if (header && header === env.PROXY_API_KEY) return await downloadDiagnosticLog(env, requestUrl);
+
+  const offered = (requestUrl.searchParams.get("key") || "").trim();
+  const stored = offered && env.DIAGNOSTIC_LOGS ? await env.DIAGNOSTIC_LOGS.get(DOWNLOAD_KEY_RECORD) : null;
+  if (stored && offered === stored) return await downloadDiagnosticLog(env, requestUrl);
+
+  return jsonResponse({
+    error: "Unauthorized",
+    message: "Send the proxy key as the X-Proxy-API-Key header, or the log download key from the 3CX template as ?key="
+  }, 401);
+}
+
 async function downloadDiagnosticLog(env, requestUrl) {
   if (!env.DIAGNOSTIC_LOGS) {
     return jsonResponse({ error: "Not configured", message: "No log store is bound to this Worker." }, 404);
@@ -602,6 +651,7 @@ export default {
       // them alive once the response has gone.
       if (pendingReports.length > 0) waiting.push(...pendingReports.splice(0));
       if (runtime.__log && runtime.__log.length > 0) waiting.push(storeDiagnosticLog(runtime));
+      if (request.headers.get("X-Log-Download-Key")) waiting.push(rememberDownloadKey(runtime, request.headers));
       if (waiting.length > 0 && ctx && typeof ctx.waitUntil === "function") {
         ctx.waitUntil(Promise.all(waiting));
       }
@@ -634,15 +684,17 @@ const requestHandler = {
       return Response.redirect(`${trimmedLoginUrl(env)}/${salesforceId}`, 302);
     }
 
+    // The stored diagnostic log, as a text file. Checked before the proxy key,
+    // because this one can also be opened in a browser with the template's
+    // log download key, which a browser cannot send as a header.
+    if (path === "/logs.txt" && request.method === "GET") {
+      return await handleLogDownload(env, request, requestUrl);
+    }
+
     // 1. Verify API Key from 3CX
     const apiKey = request.headers.get("X-Proxy-API-Key");
     if (!apiKey || apiKey !== env.PROXY_API_KEY) {
       return jsonResponse({ error: "Unauthorized" }, 401);
-    }
-
-    // The stored diagnostic log, as a text file. Same key as everything else.
-    if (path === "/logs.txt" && request.method === "GET") {
-      return await downloadDiagnosticLog(env, requestUrl);
     }
 
     setHomeCountry(env);

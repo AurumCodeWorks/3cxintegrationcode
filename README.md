@@ -3,7 +3,7 @@
 A Cloudflare Worker that sits between a 3CX phone system and Salesforce so that **calls from numbers that aren't in the CRM still get logged**, with their AI transcription, against a real Salesforce record — without creating duplicates.
 
 - **Worker:** `3cx-salesforce-proxy-cedarcare` -> https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev
-- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v54)
+- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v55)
 - **Salesforce API:** v55.0, OAuth 2.0 client-credentials flow
 
 ---
@@ -306,7 +306,7 @@ Dashboard changes apply immediately — **no redeploy needed**. Home names are r
 | New Enquiries Create Leads | On (default). A new enquiry through a tracked queue becomes a **Lead** |
 | New Enquiries Create Person Accounts | Off (default). On, it **overrides** Leads and the enquiry becomes a **Person Account**. With both off, nothing is created at all, though callers already on file are still logged |
 | Keep Call History On Leads | On (default). Off, a Lead keeps its call logs but no history in its Description |
-| Keep Call History On Person Accounts | On (default). The same for Person Accounts, so an org can keep the history on enquiry Leads and leave converted Person Accounts clean |
+| Keep Call History On Person Accounts | **Off** (default). Enquiry Leads keep their history; a converted Person Account stays clean, with its calls on the call logs alone. A template too old to send this leaves it on |
 | Create a record when an enquiry is missed | **On** (default). A caller who gives up in a tracked queue still gets a record and a reminder to ring back. Off, a missed enquiry creates nothing |
 | Raise an Action Required reminder | On (default). Off, records are still created and calls still logged, without the reminder task |
 | Ignore answered calls shorter than N seconds | `0` (default, logs them all). Drops wrong numbers and immediate hang-ups. Missed calls are exempt, since their length is the time they rang |
@@ -380,7 +380,15 @@ On Windows PowerShell:
 Invoke-WebRequest -Uri "https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev/logs.txt" -Headers @{"X-Proxy-API-Key"="YOUR_KEY"} -OutFile worker-log.txt
 ```
 
-Newest first, `?entries=500` for more (500 is the cap). It is **not** a browser link on purpose: a link can only carry the key in the URL, where it ends up in history, bookmarks and somebody's screenshot.
+Newest first, `?entries=500` for more (500 is the cap).
+
+**Or from a browser.** Set a **Log download key** in the template (any phrase), then open the **Log download link** shown beneath it with your key on the end:
+
+```
+https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev/logs.txt?key=your-phrase
+```
+
+That key only reads the log, and changing it in 3CX revokes the old one, so it is a fair thing to put in a URL. The **proxy key is not accepted there** — it writes to Salesforce, and a URL ends up in history, bookmarks and somebody's screenshot. A key changed in 3CX takes effect on the next call, since that is when the Worker learns it.
 
 Each entry holds what the template sent, what the call was, what was decided and anything that failed. Numbers are masked and nothing said on a call is stored, so it is safe to hand the file to someone. Every kept call costs one write to Cloudflare KV, so leave the setting at 0 unless you are chasing something.
 
@@ -447,7 +455,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                       # 531 checks — no network, no credentials needed
+npm test                       # 536 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions
