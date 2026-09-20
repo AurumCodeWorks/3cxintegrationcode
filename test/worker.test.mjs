@@ -3273,6 +3273,56 @@ await runTest("gaps: broken External ID field falls back to phone matching", asy
   check(!JSON.parse(contactPosts()[0]?.body || "{}").Phone_E164__c, "created without the unusable field");
 });
 
+// ── The 3CX template itself ─────────────────────────────────────────────
+// A template 3CX cannot render looks like the integration is dead: the
+// settings page comes up empty and every call falls back to defaults. On
+// 20 September a tidy-up did exactly that, by grouping parameters under
+// section names 3CX does not recognise.
+
+const { readFileSync } = await import("node:fs");
+const templateXml = readFileSync(new URL("../cloudflare_salesforce_integration.xml", import.meta.url), "utf8");
+const workerSource = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
+
+await runTest("template: every parameter is one 3CX will render", async () => {
+  const params = [...templateXml.matchAll(/<Parameter Name="([A-Za-z]+)" Type="([A-Za-z]+)" Parent="([^"]*)"/g)]
+    .map(m => ({ name: m[1], type: m[2], parent: m[3] }));
+  const names = new Set(params.map(p => p.name));
+  check(params.length > 25, `parameters found (${params.length})`);
+
+  // 3CX renders a parameter whose Parent is "General Configuration", or the
+  // name of another parameter (which nests it), and nothing else. The one
+  // empty Parent is the journaling switch the texts hang off.
+  const unrenderable = params.filter(p =>
+    p.parent !== "General Configuration" && !names.has(p.parent) && !(p.parent === "" && p.name === "ReportCallEnabled"));
+  check(unrenderable.length === 0,
+    `every Parent is one 3CX renders (bad: ${unrenderable.map(p => `${p.name}→"${p.parent}"`).join(", ") || "none"})`);
+
+  // Every setting must actually reach the Worker, and every placeholder the
+  // headers use must be a real setting.
+  const sent = new Set([...templateXml.matchAll(/<Value Key="(X-[A-Za-z-]+)">\[([A-Za-z]+)\]<\/Value>/g)].map(m => m[2]));
+  const journalingText = new Set(["Subject", "InboundCallText", "MissedCallText", "OutboundCallText", "NotAnsweredOutboundCallText", "ReportCallEnabled", "WorkerUrl", "LookupOrder"]);
+  const unsent = params.filter(p => !sent.has(p.name) && !journalingText.has(p.name));
+  check(unsent.length === 0, `every setting is sent to the Worker (missing: ${unsent.map(p => p.name).join(", ") || "none"})`);
+  // 3CX substitutes these itself; they are not settings on the page.
+  const builtIn = new Set(["Agent", "QueueExtension", "CallDirection", "Number", "DateTime", "Duration", "AgentEmail"]);
+  for (const placeholder of sent) {
+    check(names.has(placeholder) || builtIn.has(placeholder), `[${placeholder}] in the headers is a real setting or a 3CX variable`);
+  }
+});
+
+await runTest("template: the Worker and the template agree on headers", async () => {
+  // Headers the template no longer sends, kept only so a PBX on an older
+  // template still behaves.
+  const legacy = new Set(["X-Auto-Create-Policy", "X-Business-Hours-Start", "X-Business-Hours-End", "X-Business-Days"]);
+  const read = new Set([...workerSource.matchAll(/(?:headers|requestHeaders)\.get\("(X-[A-Za-z-]+)"\)/g)].map(m => m[1]));
+  read.add("X-Proxy-API-Key");
+  const missing = [...read].filter(h => !legacy.has(h) && !templateXml.includes(`<Value Key="${h}">`));
+  check(missing.length === 0, `the template sends every header the Worker reads (missing: ${missing.join(", ") || "none"})`);
+
+  const version = Number((templateXml.match(/<Crm[^>]*Version="(\d+)"/) || [])[1]);
+  check(version >= 54, `template version is current (${version})`);
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 console.log(`\n${passed} checks passed, ${failed} failed`);
 globalThis.fetch = realFetch;
