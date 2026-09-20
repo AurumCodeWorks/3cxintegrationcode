@@ -2948,6 +2948,20 @@ await runTest("outage: an unreadable field is dropped from the lookup query", as
   check(next.length === 1 && !urlHas(next[0], "PersonOtherPhone"), "asked once, already without it");
 });
 
+// X2b: a user who cannot write Description still gets the enquiry its record
+await runTest("outage: an unwritable Description costs the text, not the Lead", async () => {
+  routes = enquiryRoutes(r => JSON.parse(r.body).Description
+    ? { status: 400, json: [{ errorCode: "INVALID_FIELD_FOR_INSERT_UPDATE", message: "Unable to create/update fields: Description. Please check the security settings of this field.", fields: ["Description"] }] }
+    : created201);
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), homeEnv, ctx);
+  await Promise.all(ctx.tasks);
+  const posts = leadPosts();
+  check(posts.length === 2 && !("Description" in posts[1].body), "retried without the description");
+  check(posts[1]?.body.FirstName === "Arbour Walk" && posts[1]?.body.Phone === "+447911123456", "the enquiry keeps its name and number");
+  check(forwardedCallTask()?.WhoId === "00QHOME000000001AA", "and the call is linked to it");
+});
+
 // X3: a refusal it cannot narrow is still reported as a failure, not as "no such caller"
 await runTest("outage: an unexplained refusal is still a failure", async () => {
   routes = [

@@ -217,7 +217,11 @@ function homeFields(env, home) {
 // Fields a record is created with whatever the org's setup: its name, number,
 // opening lines and record type. Anything else (SALESFORCE_EXTRA_FIELDS, the
 // care home) helps, but a record without it is still worth having.
-const CORE_RECORD_FIELDS = new Set(["FirstName", "LastName", "Phone", "Description", "RecordTypeId"]);
+// Description is not among them on purpose. It carries the opening lines and
+// later the call history, but an enquiry with a name, a number and a care home
+// is still worth having, and a user who cannot write Description would
+// otherwise cost the record itself.
+const CORE_RECORD_FIELDS = new Set(["FirstName", "LastName", "Phone", "RecordTypeId"]);
 
 // Refusals about one field's name, access or value rather than the record.
 const FIELD_LEVEL_CODES = new Set([
@@ -328,6 +332,16 @@ async function insertRecord(env, instanceUrl, objectType, body, notices = null) 
   const isOptional = key => !CORE_RECORD_FIELDS.has(key) && key !== keyField;
   const valueKey = (key, value) => `${objectType}.${key}=${JSON.stringify(value)}`;
 
+  // Only a value that comes from configuration is worth remembering: a care
+  // home or a Lead Source is the same on the next call, so offering it again
+  // wastes an insert. Text written per call, such as the description, is
+  // different every time, and remembering it would both fill the set and
+  // silently skip the next call's.
+  const fromConfig = new Set([
+    (env.SALESFORCE_HOME_FIELD || "").trim(),
+    ...Object.keys(extraFields(env, objectType))
+  ].filter(Boolean));
+
   const payload = {};
   const skipped = [];
   for (const [key, value] of Object.entries(body)) {
@@ -357,7 +371,7 @@ async function insertRecord(env, instanceUrl, objectType, body, notices = null) 
     for (const { key, unusable } of refused) {
       if (unusable) {
         unusableFields.add(`${objectType}.${key}`);
-      } else {
+      } else if (fromConfig.has(key)) {
         if (refusedValues.size >= REFUSED_VALUES_MAX) refusedValues.clear();
         refusedValues.add(valueKey(key, payload[key]));
       }
