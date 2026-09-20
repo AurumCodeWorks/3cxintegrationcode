@@ -3029,6 +3029,126 @@ await runTest("toggles: unsubstituted placeholders leave the deployment alone", 
   check(leadPosts().length === 1, "falls back to SALESFORCE_ORG_MODEL, which is lead here");
 });
 
+// W8: a missed enquiry is a lost enquiry, so by default it still gets a record
+await runTest("toggles: a missed enquiry is captured by default", async () => {
+  const missed = "20/09/2026 11:05: Missed call from 447911123456 to 800";
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn, missed), toggles()), plainEnv, ctx);
+  await Promise.all(ctx.tasks);
+  const created = leadPosts()[0]?.body;
+  check(!!created, "a record was created for the caller who gave up");
+  check((created?.Description || "").includes("Missed enquiry") && created.Description.includes("ringing back"),
+    "and it says nobody answered");
+  check(!!alertTaskPost(), "with a reminder, even though the call is journaled against the queue");
+
+  calls = [];
+  routes = enquiryRoutes(created201);
+  const off = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn, missed), toggles({ "X-Capture-Missed": "False" })), plainEnv, off);
+  await Promise.all(off.tasks);
+  check(leadPosts().length === 0, "switched off, a missed enquiry creates nothing");
+});
+
+// W9: reminders can be switched off without losing the call or its history
+await runTest("toggles: Action Required reminders off", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"), { "X-Raise-Reminders": "False" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(!alertTaskPost(), "no reminder raised");
+  check(!!forwardedCallTask(), "the call is still logged");
+  check(appendedDescription().includes("3CX call history"), "and still added to the record");
+});
+
+// W10: a wrong number that rings off is not worth a record
+await runTest("toggles: answered calls shorter than the minimum are ignored", async () => {
+  routes = maintenanceRoutes();
+  const body = callTaskBody("003RING00000001AAA");
+  body.CallDurationInSeconds = 4;
+  const res = await worker.fetch(taskRequest(body, { "X-Min-Call-Seconds": "10" }), env, makeCtx());
+  check(res.status === 201 && !forwardedCallTask(), "the short call is dropped");
+
+  calls = [];
+  routes = maintenanceRoutes();
+  const long = callTaskBody("003RING00000001AAA");
+  long.CallDurationInSeconds = 45;
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(long, { "X-Min-Call-Seconds": "10" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(!!forwardedCallTask(), "a real conversation still is");
+
+  // A missed call has no length, so the minimum must not swallow it.
+  calls = [];
+  routes = maintenanceRoutes();
+  // A missed call still carries the seconds it rang for, which must not be
+  // read as a short conversation.
+  const missedBody = callTaskBody("003RING00000001AAA", "20/09/2026 11:05: Missed call from 447911123456 to 102 (00:00:03)");
+  missedBody.CallDurationInSeconds = 3;
+  const ctx2 = makeCtx();
+  await worker.fetch(taskRequest(missedBody, { "X-Min-Call-Seconds": "10" }), env, ctx2);
+  await Promise.all(ctx2.tasks);
+  check(!!forwardedCallTask(), "a missed call is exempt");
+});
+
+// W11: the recording link can stay in 3CX
+await runTest("toggles: recording link kept out of Salesforce", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA"), { "X-Store-Recording": "False" }), env, ctx);
+  await Promise.all(ctx.tasks);
+  const logged = forwardedCallTask()?.Description || "";
+  check(!logged.includes("https://example.com/rec.wav"), "no recording link on the call log");
+  check(logged.includes("Hello my name is Sarah Jones"), "the transcript is untouched");
+  check(!appendedDescription().includes("Recording:"), "and none in the record's history");
+});
+
+// W12: kept diagnostic logs, and pulling them back as a text file
+await runTest("toggles: diagnostic logs are kept and can be downloaded", async () => {
+  // A stand-in for Cloudflare's KV store, with the same shape the Worker uses.
+  const store = new Map();
+  const kv = {
+    put: async (key, value, options) => { store.set(key, { value, options }); },
+    list: async ({ prefix, limit }) => {
+      const keys = [...store.keys()].filter(k => k.startsWith(prefix)).sort().slice(0, limit);
+      return { keys: keys.map(name => ({ name })), list_complete: keys.length === store.size };
+    },
+    get: async (key) => (store.get(key) || {}).value
+  };
+  const keepingEnv = { ...plainEnv, DIAGNOSTIC_LOGS: kv };
+
+  routes = enquiryRoutes(created201);
+  let ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), toggles({ "X-Log-Retention-Days": "7" })), keepingEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(store.size === 1, `the call was stored (${store.size} entries)`);
+  const [entry] = [...store.values()];
+  check(entry.options.expirationTtl === 7 * 86400, "kept for the days the template asked for");
+  check(entry.value.includes("queue 800") && entry.value.includes("created Lead"), "with the call and what was decided");
+  check(!entry.value.includes("447911123456"), "and no whole phone number");
+
+  // Nothing is stored while the setting is 0, which is the default.
+  store.clear();
+  routes = enquiryRoutes(created201);
+  ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), toggles()), keepingEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(store.size === 0, "nothing stored when the template asks for 0 days");
+
+  // The download: same key as everything else, newest first, as a text file.
+  store.set("log:0000000000001:aaaaaaaa", { value: "newest entry" });
+  store.set("log:0000000000002:bbbbbbbb", { value: "older entry" });
+  const file = await worker.fetch(new Request("https://worker.example/logs.txt",
+    { headers: { "X-Proxy-API-Key": "secret" } }), keepingEnv, makeCtx());
+  const text = await file.text();
+  check(file.status === 200 && file.headers.get("Content-Type").startsWith("text/plain"), "served as text");
+  check((file.headers.get("Content-Disposition") || "").includes("attachment"), "as a download");
+  check(text.indexOf("newest entry") < text.indexOf("older entry"), "newest first");
+
+  const refused = await worker.fetch(new Request("https://worker.example/logs.txt"), keepingEnv, makeCtx());
+  check(refused.status === 401, "and never without the key");
+});
+
 // W7: diagnostic logging says what the template sent and what was decided,
 // without ever putting a whole number or a word of the call in the log
 await runTest("toggles: diagnostic logging is safe to leave on", async () => {

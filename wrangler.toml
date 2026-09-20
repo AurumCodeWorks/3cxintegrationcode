@@ -38,6 +38,13 @@ keep_vars = true
 enabled = true
 head_sampling_rate = 1
 
+# Where "Keep Diagnostic Logs For (days)" in the 3CX template stores them, so
+# they can be pulled as a text file later. Nothing is written while that
+# setting is 0, which is the default.
+[[kv_namespaces]]
+binding = "DIAGNOSTIC_LOGS"
+id = "9977453e82054829bcb2aa71c2784422"
+
 # Moving to Cedar Care's PRODUCTION org is a config change, not a deployment:
 # set SALESFORCE_LOGIN_URL below to https://cedarcarehomes.my.salesforce.com
 # (the My Domain URL: login.salesforce.com is refused) and re-set the two

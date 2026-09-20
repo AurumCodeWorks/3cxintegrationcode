@@ -1,37 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="GB" Name="CloudflareSalesforceProxy" Version="51" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
+<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="GB" Name="CloudflareSalesforceProxy" Version="53" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
   <!-- MaxLength intentionally empty: pass the FULL caller number to the proxy.
        [MaxLength] would truncate to the PBX "match length" setting (e.g. last 7
        digits), which breaks Salesforce lookups and E.164 contact creation. -->
   <Number Prefix="Off" MaxLength="" />
   <Connection MaxConcurrentRequests="16" />
   <Parameters>
-    <Parameter Name="WorkerUrl" Type="String" Parent="General Configuration" Editor="String" Title="Cloudflare Worker URL:" Validation="" Default="https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="ApiKey" Type="Password" Parent="General Configuration" Editor="String" Title="Proxy API Key (PROXY_API_KEY):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="LookupOrder" Type="List" Parent="General Configuration" Editor="String" Title="Contact Lookup Order:" Validation="" Default="Contacts/Leads/Accounts" ListValues="Contacts/Leads/Accounts" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    
-    <!-- Record creation: only calls answered through a tracked queue create a record for an unknown caller -->
-    <Parameter Name="TrackedQueues" Type="String" Parent="General Configuration" Editor="Sql" Title="Tracked Queues - calls through these create and log records (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="LogExistingAlways" Type="Boolean" Parent="General Configuration" Editor="String" Title="Always Log Calls For Existing Records (any route):" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="CreateLeads" Type="Boolean" Parent="General Configuration" Editor="String" Title="New Enquiries Create Leads:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="CreatePersonAccounts" Type="Boolean" Parent="General Configuration" Editor="String" Title="New Enquiries Create Person Accounts (overrides Leads):" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="AppendHistoryLeads" Type="Boolean" Parent="General Configuration" Editor="String" Title="Keep Call History On Leads:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="AppendHistoryPersonAccounts" Type="Boolean" Parent="General Configuration" Editor="String" Title="Keep Call History On Person Accounts:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="Diagnostics" Type="Boolean" Parent="General Configuration" Editor="String" Title="Diagnostic Logging (for support):" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <!-- Connection -->
+    <Parameter Name="WorkerUrl" Type="String" Parent="Connection" Editor="String" Title="Cloudflare Worker URL:" Validation="" Default="https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ApiKey" Type="Password" Parent="Connection" Editor="String" Title="Proxy API Key:" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="LookupOrder" Type="List" Parent="Connection" Editor="String" Title="Look callers up in this order:" Validation="" Default="Contacts/Leads/Accounts" ListValues="Contacts/Leads/Accounts" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
 
-    <!-- Call Filtering: keeps internal transfers and their transcripts out of the CRM -->
-    <Parameter Name="JournalInbound" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Answered Inbound Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="JournalMissed" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Missed Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="JournalOutbound" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Answered Outbound Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="JournalUnanswered" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Unanswered Outbound Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="InternalMaxDigits" Type="String" Parent="General Configuration" Editor="String" Title="Internal Extension Max Digits:" Validation="" Default="6" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="ExcludedPrefixes" Type="String" Parent="General Configuration" Editor="Sql" Title="Excluded Number Prefixes (comma separated):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="ExcludedExtensions" Type="String" Parent="General Configuration" Editor="Sql" Title="Excluded Extensions - never logged or created, overrides everything (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="ConfidentialExtensions" Type="String" Parent="General Configuration" Editor="Sql" Title="Confidential Extensions - log the call, never its content (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="ReceptionistExtensions" Type="String" Parent="General Configuration" Editor="Sql" Title="Receptionist Extensions - digital receptionists and ring groups (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="TranscriptPolicy" Type="List" Parent="General Configuration" Editor="String" Title="Store Call Transcripts:" Validation="" Default="Include full transcript" ListValues="Include full transcript,Metadata only,External inbound only" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <!-- Records and enquiries -->
+    <Parameter Name="TrackedQueues" Type="String" Parent="Records and enquiries" Editor="Sql" Title="Tracked queues - only calls through these create a record (comma separated, * for a range):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="CreateLeads" Type="Boolean" Parent="Records and enquiries" Editor="String" Title="A new enquiry becomes a Lead:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="CreatePersonAccounts" Type="Boolean" Parent="Records and enquiries" Editor="String" Title="A new enquiry becomes a Person Account instead:" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="CaptureMissed" Type="Boolean" Parent="Records and enquiries" Editor="String" Title="Create a record when an enquiry is missed, so someone can ring back:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="LogExistingAlways" Type="Boolean" Parent="Records and enquiries" Editor="String" Title="Log calls from people already in Salesforce, whatever the route:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
 
-    <Parameter Name="ReportCallEnabled" Type="Boolean" Parent="" Editor="String" Title="Enable Call Journaling" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <!-- What is kept on the record -->
+    <Parameter Name="AppendHistoryLeads" Type="Boolean" Parent="What is kept on the record" Editor="String" Title="Keep a call history on Leads:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="AppendHistoryPersonAccounts" Type="Boolean" Parent="What is kept on the record" Editor="String" Title="Keep a call history on Person Accounts:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="RaiseReminders" Type="Boolean" Parent="What is kept on the record" Editor="String" Title="Raise an Action Required reminder for an unnamed caller:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="TranscriptPolicy" Type="List" Parent="What is kept on the record" Editor="String" Title="Store call transcripts:" Validation="" Default="Include full transcript" ListValues="Include full transcript,Metadata only,External inbound only" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="StoreRecording" Type="Boolean" Parent="What is kept on the record" Editor="String" Title="Store the recording link:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+
+    <!-- Calls to ignore -->
+    <Parameter Name="JournalInbound" Type="Boolean" Parent="Calls to ignore" Editor="String" Title="Log answered inbound calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="JournalMissed" Type="Boolean" Parent="Calls to ignore" Editor="String" Title="Log missed calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="JournalOutbound" Type="Boolean" Parent="Calls to ignore" Editor="String" Title="Log answered outbound calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="JournalUnanswered" Type="Boolean" Parent="Calls to ignore" Editor="String" Title="Log unanswered outbound calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="MinCallSeconds" Type="String" Parent="Calls to ignore" Editor="String" Title="Ignore answered calls shorter than this many seconds (0 logs them all):" Validation="" Default="0" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="InternalMaxDigits" Type="String" Parent="Calls to ignore" Editor="String" Title="Numbers this short are internal and never reach Salesforce:" Validation="" Default="6" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ExcludedPrefixes" Type="String" Parent="Calls to ignore" Editor="Sql" Title="Never log numbers starting with (comma separated):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ExcludedExtensions" Type="String" Parent="Calls to ignore" Editor="Sql" Title="Never log these extensions, whatever else says (comma separated, * for a range):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ConfidentialExtensions" Type="String" Parent="Calls to ignore" Editor="Sql" Title="Log the call but never its content, for these extensions (comma separated, * for a range):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="ReceptionistExtensions" Type="String" Parent="Calls to ignore" Editor="Sql" Title="Digital receptionists and ring groups, which route rather than answer (comma separated, * for a range):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+
+    <!-- Support -->
+    <Parameter Name="Diagnostics" Type="Boolean" Parent="Support" Editor="String" Title="Diagnostic logging - what the Worker was told and what it decided:" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="LogRetentionDays" Type="String" Parent="Support" Editor="String" Title="Keep diagnostic logs for this many days, to download later (0 keeps none):" Validation="" Default="0" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+
+    <!-- Call journaling -->
+    <Parameter Name="ReportCallEnabled" Type="Boolean" Parent="Call journaling" Editor="String" Title="Enable Call Journaling" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="Subject" Type="String" Parent="ReportCallEnabled" Editor="String" Title="Call Subject:" Validation="" Default="3CX PhoneSystem Call" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="InboundCallText" Type="String" Parent="ReportCallEnabled" Editor="String" Title="Answered Inbound Call:" Validation="" Default="[DateTime]: Answered incoming call from [Number] to [Agent] ([Duration])[LineBreak][LineBreak]Transcription: [Transcription][LineBreak][LineBreak]Summary: [Summary][LineBreak][LineBreak]Sentiment: [Sentiment][LineBreak][LineBreak]Recording: [RecordingUrl]" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="MissedCallText" Type="String" Parent="ReportCallEnabled" Editor="String" Title="Missed Call:" Validation="" Default="[DateTime]: Missed call from [Number] to [Agent][LineBreak][LineBreak]Transcription: [Transcription][LineBreak][LineBreak]Summary: [Summary][LineBreak][LineBreak]Sentiment: [Sentiment][LineBreak][LineBreak]Recording: [RecordingUrl]" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
@@ -59,6 +70,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -100,6 +116,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -151,6 +172,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -194,6 +220,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -235,6 +266,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -286,6 +322,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -330,6 +371,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -374,6 +420,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -415,6 +466,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -450,6 +506,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -500,6 +561,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -551,6 +617,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -595,6 +666,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -629,6 +705,11 @@
           <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
           <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
           <Value Key="X-Diagnostics">[Diagnostics]</Value>
+          <Value Key="X-Capture-Missed">[CaptureMissed]</Value>
+          <Value Key="X-Raise-Reminders">[RaiseReminders]</Value>
+          <Value Key="X-Min-Call-Seconds">[MinCallSeconds]</Value>
+          <Value Key="X-Store-Recording">[StoreRecording]</Value>
+          <Value Key="X-Log-Retention-Days">[LogRetentionDays]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>

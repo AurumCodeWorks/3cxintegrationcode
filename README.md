@@ -307,7 +307,12 @@ Dashboard changes apply immediately — **no redeploy needed**. Home names are r
 | New Enquiries Create Person Accounts | Off (default). On, it **overrides** Leads and the enquiry becomes a **Person Account**. With both off, nothing is created at all, though callers already on file are still logged |
 | Keep Call History On Leads | On (default). Off, a Lead keeps its call logs but no history in its Description |
 | Keep Call History On Person Accounts | On (default). The same for Person Accounts, so an org can keep the history on enquiry Leads and leave converted Person Accounts clean |
+| Create a record when an enquiry is missed | **On** (default). A caller who gives up in a tracked queue still gets a record and a reminder to ring back. Off, a missed enquiry creates nothing |
+| Raise an Action Required reminder | On (default). Off, records are still created and calls still logged, without the reminder task |
+| Ignore answered calls shorter than N seconds | `0` (default, logs them all). Drops wrong numbers and immediate hang-ups. Missed calls are exempt, since their length is the time they rang |
+| Store the recording link | On (default). Off, the link stays in 3CX and never reaches Salesforce |
 | Diagnostic Logging | Off (default). On, the Worker logs what the template sent it and what it decided for each call. Numbers are masked and nothing said on a call is logged, so it is safe to leave on while chasing something |
+| Keep diagnostic logs for N days | `0` (default, keeps none). Stores those lines for that many days, up to 30, so they can be pulled as a text file. See [Pulling the logs](#pulling-the-logs) |
 | Log Answered Inbound / Missed / Answered Outbound / Unanswered Outbound | Per-direction on/off |
 | Internal Extension Max Digits | Numbers this short are internal — never reach Salesforce (default 6) |
 | Excluded Number Prefixes | CSV of your own numbers, e.g. `+441632960001, +4416329600`. Each entry matches every number starting with it, so use whole numbers or tight blocks (the second example covers ten numbers): an area code such as `0117` would drop every caller in that city. Up to 1,000 characters |
@@ -356,6 +361,28 @@ What this does not reach, all from earlier versions of the Worker:
 - a Lead converted since, which Salesforce no longer lets anyone edit
 
 In Cedar Care's UAT org these are test records. Delete them rather than carry them into production, which starts clean.
+
+### Pulling the logs
+
+Three places to look, in the order worth trying:
+
+1. **`npm run tail`** — live, while it is open. Best when you can make the call yourself.
+2. **The Cloudflare dashboard** — Workers & Pages → this worker → **Logs**. Searchable after the event, which `tail` is not. Retention follows the Cloudflare plan.
+3. **The Worker's own log file** — set *Keep diagnostic logs for this many days* in the template, then pull them:
+
+```bash
+curl -H "X-Proxy-API-Key: YOUR_KEY" https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev/logs.txt -o worker-log.txt
+```
+
+On Windows PowerShell:
+
+```powershell
+Invoke-WebRequest -Uri "https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev/logs.txt" -Headers @{"X-Proxy-API-Key"="YOUR_KEY"} -OutFile worker-log.txt
+```
+
+Newest first, `?entries=500` for more (500 is the cap). It is **not** a browser link on purpose: a link can only carry the key in the URL, where it ends up in history, bookmarks and somebody's screenshot.
+
+Each entry holds what the template sent, what the call was, what was decided and anything that failed. Numbers are masked and nothing said on a call is stored, so it is safe to hand the file to someone. Every kept call costs one write to Cloudflare KV, so leave the setting at 0 unless you are chasing something.
 
 ### When Salesforce refuses a field
 
@@ -420,7 +447,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                       # 478 checks — no network, no credentials needed
+npm test                       # 500 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions

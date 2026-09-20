@@ -214,8 +214,16 @@ function envForRequest(env, headers) {
   if (historyOff.length > 0) overrides.SALESFORCE_HISTORY_OFF = historyOff.join(",");
 
   if (flag("X-Diagnostics") === true) overrides.SALESFORCE_DIAGNOSTICS = "true";
+  if (flag("X-Raise-Reminders") === false) overrides.SALESFORCE_REMINDERS_OFF = "true";
 
-  return Object.keys(overrides).length > 0 ? { ...env, ...overrides } : env;
+  const days = (headers && headers.get ? headers.get("X-Log-Retention-Days") : "") || "";
+  if (days.trim() && !days.trim().startsWith("[")) overrides.SALESFORCE_LOG_DAYS = days.trim();
+
+  const request = Object.keys(overrides).length > 0 ? { ...env, ...overrides } : { ...env };
+  // Somewhere for this request's diagnostic lines to collect, when they are
+  // being kept. Per request, never shared between them.
+  if (logRetentionDays(request) > 0) request.__log = [];
+  return request;
 }
 
 /**
@@ -232,8 +240,104 @@ function diagnosticsOn(env) {
   return /^true$/i.test(String(env.SALESFORCE_DIAGNOSTICS || "").trim());
 }
 
+/** True when the template has switched the "Action Required" reminders off. */
+function remindersOff(env) {
+  return /^true$/i.test(String(env.SALESFORCE_REMINDERS_OFF || "").trim());
+}
+
+/**
+ * Answered calls shorter than the template's minimum never reach Salesforce:
+ * wrong numbers and immediate hang-ups otherwise fill a record's history.
+ * Missed calls are exempt, since their length is zero by definition.
+ */
+function tooShortToLog(headers, call, taskBody) {
+  const minimum = Number((headers.get("X-Min-Call-Seconds") || "0").trim());
+  if (!Number.isFinite(minimum) || minimum <= 0) return false;
+  if (/Missed|Unanswered/.test(call.direction || "")) return false;
+
+  const seconds = Number(taskBody.CallDurationInSeconds);
+  const length = Number.isFinite(seconds) && seconds > 0 ? seconds : durationSeconds(call.duration);
+  return length !== null && length < minimum;
+}
+
+/** The call log without its recording link, for orgs that keep recordings in 3CX alone. */
+function withoutRecording(description) {
+  const text = String(description || "").replace(/\r\n?/g, "\n");
+  const headings = [...text.matchAll(/(^|\n)[ \t]*Recording:[ \t]*/gi)];
+  if (headings.length === 0) return description;
+
+  // The last heading, matching how every other reader of a call log treats
+  // these sections, so nothing said on the call can cut it short.
+  const last = headings[headings.length - 1];
+  return text.slice(0, last.index).trimEnd();
+}
+
 function diag(env, message) {
   if (diagnosticsOn(env)) console.log(`[diagnostics] ${message}`);
+  // Kept for the downloadable log as well, whether or not it goes to the
+  // Worker's own logs, since the two are switched on separately.
+  if (env.__log) env.__log.push(`${new Date().toISOString()} ${message}`);
+}
+
+/**
+ * How long the template asks for diagnostic entries to be kept, in days.
+ * 0, the default, stores nothing at all. Capped at 30: this is for chasing
+ * something, not an archive, and every entry costs a write.
+ */
+function logRetentionDays(env) {
+  const days = Number(String(env.SALESFORCE_LOG_DAYS || "0").trim());
+  if (!Number.isFinite(days) || days <= 0) return 0;
+  return Math.min(Math.round(days), 30);
+}
+
+/** Writes this request's diagnostic lines to the log store, if one is bound. */
+async function storeDiagnosticLog(env) {
+  const lines = env.__log;
+  if (!lines || lines.length === 0) return;
+
+  const days = logRetentionDays(env);
+  if (days === 0) return;
+  if (!env.DIAGNOSTIC_LOGS) {
+    console.error("Keep Diagnostic Logs is set in the 3CX template, but no log store is bound to this Worker.");
+    return;
+  }
+
+  try {
+    // Keyed so the newest sort first, since that is what a download wants.
+    const countdown = String(9999999999999 - Date.now()).padStart(13, "0");
+    await env.DIAGNOSTIC_LOGS.put(`log:${countdown}:${crypto.randomUUID().slice(0, 8)}`,
+      lines.join("\n"), { expirationTtl: days * 86400 });
+  } catch (e) {
+    console.error("Could not store the diagnostic log entry:", e.message);
+  }
+}
+
+/**
+ * The stored entries as a plain text file, newest first. Behind the same
+ * proxy key as everything else, so it is fetched with a command rather than
+ * a browser link: a key in a URL ends up in history, bookmarks and logs.
+ */
+async function downloadDiagnosticLog(env, requestUrl) {
+  if (!env.DIAGNOSTIC_LOGS) {
+    return jsonResponse({ error: "Not configured", message: "No log store is bound to this Worker." }, 404);
+  }
+
+  const asked = Number(requestUrl.searchParams.get("entries") || "200");
+  const limit = Math.min(Number.isFinite(asked) && asked > 0 ? Math.round(asked) : 200, 500);
+  const listed = await env.DIAGNOSTIC_LOGS.list({ prefix: "log:", limit });
+  const entries = await Promise.all(listed.keys.map(key => env.DIAGNOSTIC_LOGS.get(key.name)));
+  const body = entries.filter(Boolean).join("\n\n");
+
+  return new Response(
+    `3CX to Salesforce Worker, diagnostic log, newest first\nPulled ${new Date().toISOString()}, ` +
+    `${listed.keys.length} entr${listed.keys.length === 1 ? "y" : "ies"}${listed.list_complete ? "" : ", more not shown"}\n\n${body || "Nothing stored."}\n`,
+    {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Disposition": `attachment; filename="3cx-worker-log-${ukToday()}.txt"`,
+        "Cache-Control": "no-store"
+      }
+    });
 }
 
 /** What the template told this request, as one line. */
@@ -381,6 +485,7 @@ function addNotice(notices, message) {
  */
 function queueReport(env, instanceUrl, message) {
   console.error(message);
+  if (env.__log) env.__log.push(`${new Date().toISOString()} ${message}`);
   pendingReports.push(reportMaintenanceFailure(env, instanceUrl, null, new Error(message)));
 }
 
@@ -486,14 +591,19 @@ async function getPersonAccountRecordTypeId(env, instanceUrl) {
 
 export default {
   async fetch(request, env, ctx) {
+    // The template's settings apply from here down, and this request's
+    // diagnostic lines collect on the env it returns.
+    const runtime = envForRequest(env, request.headers);
     try {
-      return await requestHandler.fetch(request, env, ctx);
+      return await requestHandler.fetch(request, runtime, ctx);
     } finally {
+      const waiting = [];
       // Reports raised along the way are already on their way; this keeps
       // them alive once the response has gone.
-      if (pendingReports.length > 0) {
-        const reports = pendingReports.splice(0);
-        if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(Promise.all(reports));
+      if (pendingReports.length > 0) waiting.push(...pendingReports.splice(0));
+      if (runtime.__log && runtime.__log.length > 0) waiting.push(storeDiagnosticLog(runtime));
+      if (waiting.length > 0 && ctx && typeof ctx.waitUntil === "function") {
+        ctx.waitUntil(Promise.all(waiting));
       }
     }
   }
@@ -501,8 +611,6 @@ export default {
 
 const requestHandler = {
   async fetch(request, env, ctx) {
-    // The template's toggles apply from here down.
-    env = envForRequest(env, request.headers);
     const requestUrl = new URL(request.url);
     // Repeated slashes collapse. A trailing slash on the Worker URL in 3CX
     // produces "//services/...", and a path beginning "//" is otherwise read
@@ -530,6 +638,11 @@ const requestHandler = {
     const apiKey = request.headers.get("X-Proxy-API-Key");
     if (!apiKey || apiKey !== env.PROXY_API_KEY) {
       return jsonResponse({ error: "Unauthorized" }, 401);
+    }
+
+    // The stored diagnostic log, as a text file. Same key as everything else.
+    if (path === "/logs.txt" && request.method === "GET") {
+      return await downloadDiagnosticLog(env, requestUrl);
     }
 
     setHomeCountry(env);
@@ -1149,7 +1262,16 @@ function trackedQueueGate(headers, call) {
   const answered = viaQueue && !agentIsRouting && !/Missed|Unanswered/.test(call.direction || "");
   const logExisting = !/^false$/i.test((headers.get("X-Log-Existing-Always") || "True").trim());
 
-  return { active: true, queue, viaQueue, answered, logExisting };
+  // A caller who gave up in the enquiries queue is a lost enquiry, not a
+  // non-event, so by default they still get a record and a reminder to ring
+  // back. The routing check is deliberately not applied: an abandoned queue
+  // call is journaled against the queue itself, which is the whole point.
+  // Only inbound counts — an outbound call nobody answered is ours, not an
+  // enquiry.
+  const captureMissed = !/^false$/i.test((headers.get("X-Capture-Missed") || "True").trim());
+  const missed = viaQueue && captureMissed && /Inbound Missed/.test(call.direction || "");
+
+  return { active: true, queue, viaQueue, answered, missed, create: answered || missed, logExisting };
 }
 
 /**
@@ -1445,8 +1567,10 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
     data = await response.json();
   } else {
     const errorText = await response.text();
-    console.error(`Salesforce refused the 3CX lookup (${response.status}), continuing as if nobody matched: ` +
-      `${errorText.slice(0, 300)}`);
+    const refusal = `Salesforce refused the 3CX lookup (${response.status}), continuing as if nobody matched: ` +
+      `${errorText.slice(0, 300)}`;
+    console.error(refusal);
+    if (env.__log) env.__log.push(`${new Date().toISOString()} ${refusal}`);
     const blocked = blockedFieldFrom(errorText);
     if (blocked) {
       rememberBlockedField(env, new URL(targetUrl).origin, blocked, errorText);
@@ -2304,7 +2428,10 @@ function enquiryName(env, call, queueExtension, phone) {
   return {
     firstName: home || "Phone",
     lastName: `Enquiry ${phone} (${ukDate().replace(/ \d{4}$/, "")} ${call.callTime})`,
-    description: `New enquiry${through ? ` through ${through}` : ""}\n${ukDate()} at ${call.callTime}`,
+    description: /Missed/.test(call.direction || "")
+      ? `Missed enquiry${through ? ` through ${through}` : ""}, nobody answered\n${ukDate()} at ${call.callTime}` +
+        `\nWorth ringing back.`
+      : `New enquiry${through ? ` through ${through}` : ""}\n${ukDate()} at ${call.callTime}`,
     fields: homeFields(env, departmentName(env, call, queueExtension)),
     // Anything staff need to finish by hand, raised as a Task once the call is logged.
     notices: []
@@ -3105,9 +3232,13 @@ function addReminderCall(description, callLine, joinAs = null) {
  */
 async function upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, ownerId,
                                routing = { queues: [], menus: [] }, continuation = false) {
+  if (remindersOff(env)) return;
+
   // A menu or queue leg is not a call anyone took: the person who answers
-  // next raises or updates the reminder.
-  if (isRoutingExtension(routing, call.agent)) return;
+  // next raises or updates the reminder. A missed call is the exception, and
+  // the case that most needs one: it is journaled against the queue precisely
+  // because nobody picked it up, and somebody should ring back.
+  if (isRoutingExtension(routing, call.agent) && !/Missed/.test(call.direction || "")) return;
 
   const today = ukToday();
   const home = departmentFor(env, call.agent);
@@ -3204,7 +3335,7 @@ async function applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate) {
   }
 
   const names = enquiryName(env, call, gate.queue, phone);
-  const { target, failed, created } = await locateRecord(env, instanceUrl, phone, gate.answered, names);
+  const { target, failed, created } = await locateRecord(env, instanceUrl, phone, gate.create, names);
 
   if (target && target.whoId) {
     taskBody.WhoId = target.whoId;
@@ -3311,6 +3442,11 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
     return jsonResponse({ success: true, errors: [], filtered: "number" }, 201);
   }
 
+  if (tooShortToLog(request.headers, call, taskBody)) {
+    console.log(`Call from ${maskPhone(call.phone || "")} was shorter than the template's minimum — call log dropped.`);
+    return jsonResponse({ success: true, errors: [], filtered: "duration" }, 201);
+  }
+
   // Before Tracked Queues, so an excluded extension never creates a record
   // either. The lookup has no extension to check, so this is the only point
   // an exclusion can apply.
@@ -3337,6 +3473,10 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
       taskBody.Description = redactCallContent(taskBody.Description);
     }
 
+    if (/^false$/i.test((request.headers.get("X-Store-Recording") || "True").trim())) {
+      taskBody.Description = withoutRecording(taskBody.Description);
+    }
+
     taskBody.Description = truncateCallLog(taskBody.Description);
   }
 
@@ -3349,6 +3489,7 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   if (gate.active) {
     const decision = await applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate);
     console.log(`Tracked queues (queue ${gate.queue || "none"}, extension ${call.agent}): ${decision.reason}`);
+    diag(env, `decision: ${decision.reason}`);
     // Raised once the call log is saved, since they say it was, and so they
     // can go to whoever ends up owning it.
     enquiryAlert = decision.alert || null;
