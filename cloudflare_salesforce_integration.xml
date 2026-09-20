@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="GB" Name="CloudflareSalesforceProxy" Version="50" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
+<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="GB" Name="CloudflareSalesforceProxy" Version="51" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
   <!-- MaxLength intentionally empty: pass the FULL caller number to the proxy.
        [MaxLength] would truncate to the PBX "match length" setting (e.g. last 7
        digits), which breaks Salesforce lookups and E.164 contact creation. -->
@@ -13,6 +13,11 @@
     <!-- Record creation: only calls answered through a tracked queue create a record for an unknown caller -->
     <Parameter Name="TrackedQueues" Type="String" Parent="General Configuration" Editor="Sql" Title="Tracked Queues - calls through these create and log records (comma separated, * for prefix):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="LogExistingAlways" Type="Boolean" Parent="General Configuration" Editor="String" Title="Always Log Calls For Existing Records (any route):" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="CreateLeads" Type="Boolean" Parent="General Configuration" Editor="String" Title="New Enquiries Create Leads:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="CreatePersonAccounts" Type="Boolean" Parent="General Configuration" Editor="String" Title="New Enquiries Create Person Accounts (overrides Leads):" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="AppendHistoryLeads" Type="Boolean" Parent="General Configuration" Editor="String" Title="Keep Call History On Leads:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="AppendHistoryPersonAccounts" Type="Boolean" Parent="General Configuration" Editor="String" Title="Keep Call History On Person Accounts:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="Diagnostics" Type="Boolean" Parent="General Configuration" Editor="String" Title="Diagnostic Logging (for support):" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
 
     <!-- Call Filtering: keeps internal transfers and their transcripts out of the CRM -->
     <Parameter Name="JournalInbound" Type="Boolean" Parent="General Configuration" Editor="String" Title="Log Answered Inbound Calls:" Validation="" Default="True" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
@@ -49,6 +54,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -85,6 +95,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -131,6 +146,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -169,6 +189,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -205,6 +230,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -251,6 +281,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -290,6 +325,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -329,6 +369,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -365,6 +410,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -395,6 +445,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -440,6 +495,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -486,6 +546,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -525,6 +590,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>
@@ -554,6 +624,11 @@
           <Value Key="X-Tracked-Queues">[TrackedQueues]</Value>
           <Value Key="X-Excluded-Extensions">[ExcludedExtensions]</Value>
           <Value Key="X-Log-Existing-Always">[LogExistingAlways]</Value>
+          <Value Key="X-Create-Leads">[CreateLeads]</Value>
+          <Value Key="X-Create-Person-Accounts">[CreatePersonAccounts]</Value>
+          <Value Key="X-Append-History-Lead">[AppendHistoryLeads]</Value>
+          <Value Key="X-Append-History-Account">[AppendHistoryPersonAccounts]</Value>
+          <Value Key="X-Diagnostics">[Diagnostics]</Value>
           <Value Key="X-Confidential-Extensions">[ConfidentialExtensions]</Value>
           <Value Key="X-Queue-Extension">[QueueExtension]</Value>
           <Value Key="X-Agent-Extension">[Agent]</Value>

@@ -30,6 +30,14 @@ compatibility_date = "2024-03-01"
 #   - SALESFORCE_CLIENT_SECRET     (secret)
 keep_vars = true
 
+# Persistent logs in the Cloudflare dashboard (Workers & Pages → this worker →
+# Logs), searchable after the event. "npx wrangler tail" only shows what
+# happens while it is open, which is no use for "it broke an hour ago".
+# Retention follows the account's plan, so treat it as days, not months.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 # Moving to Cedar Care's PRODUCTION org is a config change, not a deployment:
 # set SALESFORCE_LOGIN_URL below to https://cedarcarehomes.my.salesforce.com
 # (the My Domain URL: login.salesforce.com is refused) and re-set the two

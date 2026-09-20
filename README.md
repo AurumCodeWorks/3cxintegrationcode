@@ -123,7 +123,9 @@ Once a human gives the record a real name, the next call from that number finds 
 
 ## Org models
 
-Set `SALESFORCE_ORG_MODEL` in [wrangler.toml](wrangler.toml). It defines which records the Worker writes, so it is deployed with the code rather than edited in the dashboard.
+Set `SALESFORCE_ORG_MODEL` in [wrangler.toml](wrangler.toml). It defines which records the Worker writes when the 3CX template does not say.
+
+**From template v51 the template decides**, through *New Enquiries Create Leads* and *New Enquiries Create Person Accounts*, so one PBX can differ from another against the same Worker and a change needs no deploy. Person Accounts win when both are on; with both off nothing is created and callers already on file are still logged. A template that does not send them leaves `SALESFORCE_ORG_MODEL` in charge.
 
 | Mode | Unknown caller becomes | Matching order | Task linked to |
 |---|---|---|---|
@@ -301,6 +303,11 @@ Dashboard changes apply immediately — **no redeploy needed**. Home names are r
 | Tracked Queues | CSV of queue extensions, e.g. `800, 801` or `80*`. Only calls answered through these create a record for an unknown caller. Blank means nothing is ever created |
 | Excluded Extensions | CSV of extensions or queues, `*` for prefix. Nothing about these calls reaches Salesforce, and it overrides Tracked Queues and Always Log |
 | Always Log Calls For Existing Records | On (default): calls from people already in Salesforce are logged whatever the route. Off: only through a tracked queue |
+| New Enquiries Create Leads | On (default). A new enquiry through a tracked queue becomes a **Lead** |
+| New Enquiries Create Person Accounts | Off (default). On, it **overrides** Leads and the enquiry becomes a **Person Account**. With both off, nothing is created at all, though callers already on file are still logged |
+| Keep Call History On Leads | On (default). Off, a Lead keeps its call logs but no history in its Description |
+| Keep Call History On Person Accounts | On (default). The same for Person Accounts, so an org can keep the history on enquiry Leads and leave converted Person Accounts clean |
+| Diagnostic Logging | Off (default). On, the Worker logs what the template sent it and what it decided for each call. Numbers are masked and nothing said on a call is logged, so it is safe to leave on while chasing something |
 | Log Answered Inbound / Missed / Answered Outbound / Unanswered Outbound | Per-direction on/off |
 | Internal Extension Max Digits | Numbers this short are internal — never reach Salesforce (default 6) |
 | Excluded Number Prefixes | CSV of your own numbers, e.g. `+441632960001, +4416329600`. Each entry matches every number starting with it, so use whole numbers or tight blocks (the second example covers ten numbers): an area code such as `0117` would drop every caller in that city. Up to 1,000 characters |
@@ -413,7 +420,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                           # 430 checks — no network, no credentials needed
+npm test                       # 478 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions

@@ -2898,6 +2898,166 @@ await runTest("aligned: generic Salesforce login hosts refused", async () => {
   check(link.headers.get("Location") === "https://login.example.com/003RING00000001AAA", "a trailing slash does not double up in record links");
 });
 
+// ── The template's record and history toggles ───────────────────────────
+// Which record a new enquiry becomes, and whether it keeps a call history,
+// are template settings now, so one PBX can differ from another without a
+// deploy. Person Accounts win over Leads; with both off nothing is created.
+
+const toggles = (over = {}) => tracked({ "X-Queue-Extension": "800", "X-Create-Leads": "True", ...over });
+const plainEnv = { ...env, EXTENSION_DEPARTMENTS: '{"800":"Arbour Walk"}' };  // no SALESFORCE_ORG_MODEL
+
+// W1: the Leads toggle decides the record type, whatever the Worker was deployed with
+await runTest("toggles: Create Leads makes a new enquiry a Lead", async () => {
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), toggles()), plainEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts().length === 1, "a Lead was created without SALESFORCE_ORG_MODEL being set");
+  check(forwardedCallTask()?.WhoId === "00QHOME000000001AA", "and the call is linked to it");
+});
+
+// W2: Person Accounts win when both are on
+await runTest("toggles: Create Person Accounts overrides Leads", async () => {
+  routes = [
+    tokenRoute,
+    { match: recordTypeQuery, reply: { records: [{ Id: "012RT00000000001AAA" }] } },
+    { match: byAccountPhone, reply: (r, hits) => hits % 2 === 1
+      ? { records: [] }
+      : { records: [personAccount("001TOG0000000001AA", "003TOG0000000001AA", "+447911123456")] } },
+    noBusinessContact,
+    { match: accountPost, reply: { json: { id: "001TOG0000000001AA" }, status: 201 } },
+    { match: taskPost, reply: { json: { id: "00TTOG00000000001A" }, status: 201 } },
+    { match: byAccountContactId, reply: { records: [personAccount("001TOG0000000001AA", "003TOG0000000001AA", "+447911123456")] } },
+    { match: openIntegrationAlert, reply: { records: [] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn),
+    toggles({ "X-Create-Person-Accounts": "True" })), plainEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(calls.some(accountPost), "a Person Account was created");
+  check(!calls.some(leadPost), "and no Lead");
+  check(forwardedCallTask()?.WhoId === "003TOG0000000001AA", "the call links to its person contact");
+});
+
+// W3: both off creates nothing, and does not even ask 3CX to journal an unknown caller
+await runTest("toggles: both off creates nothing", async () => {
+  routes = [tokenRoute, { match: sfSearch, reply: { searchRecords: [] } }, { match: byAccountPhone, reply: { records: [] } },
+    { match: byLeadPhone, reply: { records: [] } }, noBusinessContact];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)",
+      toggles({ "X-Create-Leads": "False" })), plainEnv, makeCtx());
+  check((await res.json()).searchRecords.length === 0, "no stand-in, so 3CX does not journal an unknown caller");
+  check(!calls.some(leadPost) && !calls.some(accountPost), "nothing created");
+
+  // A caller already on file is still found, and still logged.
+  calls = [];
+  routes = [tokenRoute, { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byAccountPhone, reply: { records: [] } },
+    { match: byLeadPhone, reply: { records: [openLead("00QEXIST00000001AA", "+447911123456")] } }, noBusinessContact];
+  const known = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)",
+      toggles({ "X-Create-Leads": "False" })), plainEnv, makeCtx());
+  check((await known.json()).searchRecords?.[0]?.Id === "00QEXIST00000001AA", "an existing caller is still matched");
+
+  // And a stand-in that arrives anyway, from a call that started before the
+  // toggles were changed, still creates nothing.
+  calls = [];
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  const res2 = await worker.fetch(taskRequest(callTaskBody(standIn),
+    toggles({ "X-Create-Leads": "False" })), plainEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(res2.status === 201 && !calls.some(leadPost) && !calls.some(accountPost),
+    "a stand-in journaled while both are off creates nothing");
+});
+
+// W4: history off for Leads leaves the record alone but keeps the call log and reminder
+await runTest("toggles: call history off for Leads", async () => {
+  const leadRoutes = () => [
+    tokenRoute,
+    { match: taskPost, reply: { json: { id: "00THIST00000000003A" }, status: 201 } },
+    { match: byLeadId, reply: { records: [openLead("00QHIST00000001AAA", "+447911123456")] } },
+    { match: openIntegrationAlert, reply: { records: [] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  routes = leadRoutes();
+  let ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("00QHIST00000001AAA"),
+    { "X-Log-Existing-Always": "True", "X-Append-History-Lead": "False" }), leadEnv, ctx);
+  await Promise.all(ctx.tasks);
+  const patched = calls.filter(c => c.method === "PATCH" && c.url.includes("/sobjects/Lead/")).map(c => JSON.parse(c.body));
+  check(!patched.some(p => p.Description), "nothing written to the Lead's description");
+  check(!!forwardedCallTask(), "the call log is still saved");
+  check(!!alertTaskPost(), "and the reminder still raised");
+
+  // On by default.
+  calls = [];
+  routes = leadRoutes();
+  ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("00QHIST00000001AAA"), { "X-Log-Existing-Always": "True" }), leadEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(calls.filter(c => c.method === "PATCH" && c.url.includes("/sobjects/Lead/")).map(c => JSON.parse(c.body))
+    .some(p => (p.Description || "").includes("3CX call history")), "history kept when the toggle is left alone");
+});
+
+// W5: the two history toggles are independent
+await runTest("toggles: history off for Person Accounts only", async () => {
+  routes = [
+    tokenRoute,
+    { match: taskPost, reply: { json: { id: "00THIST00000000004A" }, status: 201 } },
+    { match: byAccountContactId, reply: { records: [personAccount("001HIST0000001AAA", "003HIST0000001AAA", "+447911123456")] } },
+    { match: openIntegrationAlert, reply: { records: [] } },
+    noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003HIST0000001AAA"),
+    { "X-Log-Existing-Always": "True", "X-Append-History-Account": "False", "X-Append-History-Lead": "True" }), paEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(!calls.filter(c => c.method === "PATCH" && c.url.includes("/sobjects/Account/")).map(c => JSON.parse(c.body)).some(p => p.Description),
+    "nothing written to the Person Account's description");
+});
+
+// W6: a template that leaves the settings unsubstituted changes nothing
+await runTest("toggles: unsubstituted placeholders leave the deployment alone", async () => {
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn),
+    tracked({ "X-Queue-Extension": "800", "X-Create-Leads": "[CreateLeads]", "X-Create-Person-Accounts": "[CreatePersonAccounts]" })),
+    homeEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(leadPosts().length === 1, "falls back to SALESFORCE_ORG_MODEL, which is lead here");
+});
+
+// W7: diagnostic logging says what the template sent and what was decided,
+// without ever putting a whole number or a word of the call in the log
+await runTest("toggles: diagnostic logging is safe to leave on", async () => {
+  const lines = [];
+  const realLog = console.log;
+  const capture = async (extra) => {
+    routes = enquiryRoutes(created201);
+    const ctx = makeCtx();
+    console.log = (...a) => lines.push(a.join(" "));
+    try {
+      await worker.fetch(taskRequest(callTaskBody(standIn), toggles(extra)), plainEnv, ctx);
+      await Promise.all(ctx.tasks);
+    } finally {
+      console.log = realLog;
+    }
+  };
+
+  await capture({ "X-Diagnostics": "True" });
+  const diagnostics = lines.filter(l => l.startsWith("[diagnostics]"));
+  check(diagnostics.some(l => l.includes("tracked queues 1") && l.includes("creates lead")), "says what the template sent");
+  check(diagnostics.some(l => l.includes("queue 800") && l.includes("agent 102")), "and what the call was");
+  check(diagnostics.some(l => l.includes("+44*******456")), "the number is masked");
+  check(!diagnostics.some(l => l.includes("447911123456") || l.includes("Sarah Jones")), "never the whole number, never what was said");
+
+  lines.length = 0;
+  await capture({});
+  check(!lines.some(l => l.startsWith("[diagnostics]")), "silent while the toggle is off");
+});
+
 // ── Surviving a Salesforce that refuses things ──────────────────────────
 // The September 2026 outage: one field the integration user could not read
 // failed the 3CX lookup, the Worker handed 3CX the error, and 3CX never

@@ -162,7 +162,88 @@ function searchShape(q, term) {
  */
 function orgModel(env) {
   const model = (env.SALESFORCE_ORG_MODEL || "contact").trim().toLowerCase();
-  return ["contact", "personaccount", "lead"].includes(model) ? model : "contact";
+  return ["contact", "personaccount", "lead", "none"].includes(model) ? model : "contact";
+}
+
+/** False when the template has switched record creation off altogether. */
+function creationAllowed(env) {
+  return orgModel(env) !== "none";
+}
+
+/**
+ * Whether this object type keeps a call history in its Description. The
+ * template decides it per record type, so an org can keep the history on
+ * enquiry Leads while leaving converted Person Accounts clean. Contacts
+ * follow the deployed behaviour, which is to keep it.
+ */
+function keepsHistory(env, objectType) {
+  const off = String(env.SALESFORCE_HISTORY_OFF || "").split(",").map(v => v.trim()).filter(Boolean);
+  return !off.includes(objectType);
+}
+
+/**
+ * The template's per-call switches, folded into env so everything downstream
+ * sees them without being passed the headers:
+ *
+ *   New Enquiries Create Leads / Create Person Accounts → SALESFORCE_ORG_MODEL
+ *   Keep Call History On Leads / On Person Accounts     → SALESFORCE_HISTORY_OFF
+ *
+ * Person Accounts win when both are on, and with both off nothing is created
+ * at all, though callers already on file are still logged. A template that
+ * sends none of them leaves the deployed settings exactly as they are.
+ */
+function envForRequest(env, headers) {
+  const flag = (name) => {
+    const raw = headers && headers.get ? headers.get(name) : null;
+    const value = (raw || "").trim();
+    // 3CX sends the placeholder itself when a setting is not substituted.
+    if (!value || value.startsWith("[")) return null;
+    return !/^false$/i.test(value);
+  };
+
+  const leads = flag("X-Create-Leads");
+  const personAccounts = flag("X-Create-Person-Accounts");
+  const overrides = {};
+  if (leads !== null || personAccounts !== null) {
+    overrides.SALESFORCE_ORG_MODEL = personAccounts ? "personaccount" : (leads ? "lead" : "none");
+  }
+
+  const historyOff = [];
+  if (flag("X-Append-History-Lead") === false) historyOff.push("Lead");
+  if (flag("X-Append-History-Account") === false) historyOff.push("Account");
+  if (historyOff.length > 0) overrides.SALESFORCE_HISTORY_OFF = historyOff.join(",");
+
+  if (flag("X-Diagnostics") === true) overrides.SALESFORCE_DIAGNOSTICS = "true";
+
+  return Object.keys(overrides).length > 0 ? { ...env, ...overrides } : env;
+}
+
+/**
+ * Diagnostic logging, switched on per PBX from the template while something is
+ * being chased, and off again afterwards. It says what the Worker was told and
+ * what it decided, which is the part that is otherwise invisible: settings a
+ * template upload may have cleared, the queue and extension on the leg, and
+ * why a call led to nothing.
+ *
+ * Numbers are masked and nothing said on a call is ever logged, so it stays
+ * safe to leave on.
+ */
+function diagnosticsOn(env) {
+  return /^true$/i.test(String(env.SALESFORCE_DIAGNOSTICS || "").trim());
+}
+
+function diag(env, message) {
+  if (diagnosticsOn(env)) console.log(`[diagnostics] ${message}`);
+}
+
+/** What the template told this request, as one line. */
+function templateSettings(env, headers) {
+  const read = name => (headers && headers.get ? headers.get(name) : "") || "";
+  const count = value => value.split(",").map(v => v.trim()).filter(Boolean).length;
+  return `template: tracked queues ${count(read("X-Tracked-Queues"))}, receptionists ${count(read("X-Receptionist-Extensions"))}, ` +
+    `excluded extensions ${count(read("X-Excluded-Extensions"))}, excluded prefixes ${count(read("X-Excluded-Prefixes"))}, ` +
+    `always log existing ${read("X-Log-Existing-Always") || "(unset)"}, creates ${orgModel(env)}, ` +
+    `history off for ${env.SALESFORCE_HISTORY_OFF || "nothing"}, transcripts "${read("X-Transcript-Policy") || "(unset)"}"`;
 }
 
 /**
@@ -420,6 +501,8 @@ export default {
 
 const requestHandler = {
   async fetch(request, env, ctx) {
+    // The template's toggles apply from here down.
+    env = envForRequest(env, request.headers);
     const requestUrl = new URL(request.url);
     // Repeated slashes collapse. A trailing slash on the Worker URL in 3CX
     // produces "//services/...", and a path beginning "//" is otherwise read
@@ -1407,6 +1490,10 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
         const mayCreate = !gated && !excluded && shouldAutoCreate(requestHeaders);
         const { target, created } = await locateRecord(env, instanceUrl, phone, mayCreate);
 
+        diag(env, `lookup ${maskPhone(phone)}: ${target && target.whoId ? `matched ${target.objectType} ${target.recordId}` : "no match"}` +
+          `, direction "${requestHeaders.get("X-Call-Direction") || "(unset)"}", agent ${lookupAgent || "(none)"}, ` +
+          `${gated ? `${trackedQueueList(requestHeaders).length} tracked queues` : "no tracked queue headers"}`);
+
         if (target && target.whoId) {
           // 3CX is told the entity type that makes its own journaling work:
           // "Lead" so the task lands on the Lead, and "Contact" for a Person
@@ -1443,7 +1530,9 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
         // leaves it unsubstituted the stand-in is returned and the journal is
         // dropped instead.
         const outbound = /^outbound$/i.test((requestHeaders.get("X-Call-Direction") || "").trim());
-        if (gated && trackedQueueList(requestHeaders).length > 0 && !outbound) {
+        // Nothing is created while both record toggles are off, so an unknown
+        // caller gets no stand-in either: journaling one would only be dropped.
+        if (gated && trackedQueueList(requestHeaders).length > 0 && !outbound && creationAllowed(env)) {
           return pendingCallerMatch(phone);
         }
 
@@ -1487,7 +1576,11 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
  * placeholder name is used.
  */
 async function locateRecord(env, instanceUrl, phone, mayCreate, names = null) {
-  const model = orgModel(env);
+  // With both record toggles off nothing is created, but callers already on
+  // file are still found and still logged, so matching runs as for Leads.
+  const configured = orgModel(env);
+  const model = configured === "none" ? "lead" : configured;
+  mayCreate = mayCreate && configured !== "none";
   const failed = { target: null, failed: true };
 
   // A create that matched an existing record (a race, or the unique key) is
@@ -2971,7 +3064,11 @@ async function maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBod
       }));
     }
 
-    await attempt(() => appendCallToRecord(env, routing, instanceUrl, objectType, record, call, description, continuation));
+    if (keepsHistory(env, objectType)) {
+      await attempt(() => appendCallToRecord(env, routing, instanceUrl, objectType, record, call, description, continuation));
+    } else {
+      console.log(`Call history is switched off for ${objectType}s in the 3CX template, so the call log alone records this call.`);
+    }
     await attempt(() => upsertAlertTask(env, instanceUrl, whoId, record, objectType, call, nameInfo, taskBody.OwnerId, routing, continuation));
 
     if (failures.length > 0) throw new Error(failures.join("; "));
@@ -3218,6 +3315,11 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   // either. The lookup has no extension to check, so this is the only point
   // an exclusion can apply.
   const queueExtension = extensionFromHeader(request.headers, "X-Queue-Extension");
+  diag(env, templateSettings(env, request.headers));
+  diag(env, `call log: ${maskPhone(call.phone || "unknown")} ${call.direction}, queue ${queueExtension || "none"}, ` +
+    `agent ${call.agent}, duration ${call.duration || "none"}, ` +
+    // The stand-in id carries the caller's number, so it is never printed raw.
+    `linked to ${isPendingCallerId(taskBody.WhoId) ? "a new caller stand-in" : (taskBody.WhoId || "nothing")}`);
   if (isExcludedExtension(request.headers, call.agent, queueExtension)) {
     console.log(`Extension ${call.agent} (queue ${queueExtension || "none"}) is excluded — call log dropped.`);
     return jsonResponse({ success: true, errors: [], filtered: "extension" }, 201);
