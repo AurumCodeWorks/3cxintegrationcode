@@ -350,6 +350,15 @@ What this does not reach, all from earlier versions of the Worker:
 
 In Cedar Care's UAT org these are test records. Delete them rather than carry them into production, which starts clean.
 
+### When Salesforce refuses a field
+
+A field the integration user cannot read fails the **whole** query it appears in, and Salesforce words it exactly like a field that does not exist: `No such column 'PersonHomePhone' on entity 'Account'`. Two rules keep one hidden field from taking the integration down, as it did on 16 September 2026:
+
+- **A refused 3CX lookup never reaches 3CX.** It is answered as "nobody matched", so an unknown caller still gets a stand-in and the call is still journaled. 3CX does not journal a call whose lookup returned an error, so passing the error on costs the call log, the transcript and the record.
+- **A refused query is retried without the field it named**, and that field is left out of later queries until the Worker restarts. Callers are then matched on the fields that remain, which is narrower but works.
+
+Both are reported in `wrangler tail`, and through `ALERT_WEBHOOK_URL` if one is set. Neither is a substitute for granting the field: check [SALESFORCE-PERMISSIONS.md](SALESFORCE-PERMISSIONS.md) after any change of run-as user, since field permissions belong to the user, not the app.
+
 ### When background work fails
 
 Adding the call to the record and upserting the reminder happen *after* the call log is safely saved. If that background step fails, the call is still logged but the record's history or reminder may be missing it, and previously nothing said so.

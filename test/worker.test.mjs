@@ -111,6 +111,9 @@ const ringTimeContact = (id, phone) => ({
 
 // Helpers to pull specific outbound calls out of the log
 const contactPosts = () => calls.filter(contactPost);
+const callLogPostsOf = log => log.filter(taskPost).map(c => JSON.parse(c.body)).filter(b => b.Subject === "3CX PhoneSystem Call");
+const integrationAlerts = () => calls.filter(taskPost).map(c => JSON.parse(c.body))
+  .filter(b => (b.Subject || "").startsWith("3CX Integration Error:"));
 const forwardedCallTask = () => calls.filter(taskPost).map(c => JSON.parse(c.body)).find(b => b.Subject === "3CX PhoneSystem Call");
 const alertTaskPost = () => calls.filter(taskPost).map(c => JSON.parse(c.body)).find(b => (b.Subject || "").startsWith("Action Required:"));
 const contactPatches = () => calls.filter(c => c.method === "PATCH" && c.url.includes("/sobjects/Contact/")).map(c => ({ url: c.url, body: JSON.parse(c.body) }));
@@ -724,8 +727,16 @@ await runTest("lookup matches every stored phone format", async () => {
   for (const variant of ["+447700900123", "447700900123", "07700900123", "07700 900123", "+44 7700 900123"]) {
     check(soql.includes(variant), `SOQL matches the "${variant}" format`);
   }
-  for (const field of ["Phone", "MobilePhone", "HomePhone", "OtherPhone"]) {
+  // Contacts are matched on Phone and MobilePhone only. HomePhone,
+  // OtherPhone, AssistantPhone and Fax were dropped from both the template
+  // and these queries because Cedar Care's org hides them from the
+  // integration user, and one hidden field fails the whole lookup (see the
+  // findings in SALESFORCE-PERMISSIONS.md).
+  for (const field of ["Phone", "MobilePhone"]) {
     check(soql.includes(`${field} IN (`), `${field} searched`);
+  }
+  for (const field of ["HomePhone", "OtherPhone", "AssistantPhone"]) {
+    check(!soql.includes(`${field} IN (`), `${field} left out, since the org hides it`);
   }
 });
 
@@ -2265,9 +2276,14 @@ await runTest("gaps: refused link retries the call log unlinked", async () => {
   const ctx = makeCtx();
   const res = await worker.fetch(taskRequest(callTaskBody("003GONE0000000001AA")), env, ctx);
   await Promise.all(ctx.tasks);
-  const posts = calls.filter(taskPost).map(c => JSON.parse(c.body));
+  const posts = callLogPostsOf(calls);
   check(res.status === 201, "3CX sees the call saved");
   check(posts.length === 2 && !("WhoId" in posts[1]), "second attempt carried no link");
+  const alert = integrationAlerts().find(a => a.Subject === "3CX Integration Error: call saved without its caller's record");
+  check(!!alert && !alert.WhoId, "staff told in Salesforce, on an unlinked Task");
+  check(alert?.OwnerId === "005xx0000012345AAA", "owned by whoever took the call");
+  check((alert?.Description || "").includes("+447911123456") && alert.Description.includes("003GONE0000000001AA"),
+    "with the caller's number and the record it was meant for");
 });
 
 // G14: a non-JSON call log is refused rather than forwarded unfiltered
@@ -2425,6 +2441,7 @@ await runTest("gaps: pre-v46 lookup creates nothing for an excluded extension", 
 // and duplicate rules set to Allow not refusing API inserts.
 
 const homeEnv = { ...leadEnv, EXTENSION_DEPARTMENTS: '{"800":"Arbour Walk","102":"Arbour Walk"}' };
+const openIntegrationAlert = r => r.method === "GET" && r.url.includes("FROM+Task") && urlHas(r, "3CX Integration Error:");
 const hook = r => r.url.startsWith("https://hooks.example/");
 const webhookTexts = () => calls.filter(hook).map(c => JSON.parse(c.body).text || "");
 const leadPosts = () => calls.filter(leadPost).map(c => ({ body: JSON.parse(c.body), headers: c.headers }));
@@ -2443,6 +2460,7 @@ const enquiryRoutes = (leadReply, extra = []) => [
   { match: leadPost, reply: leadReply },
   { match: taskPost, reply: { json: { id: "00TALIGN000000001A" }, status: 201 } },
   { match: byLeadId, reply: { records: [enquiryLead] } },
+  { match: openIntegrationAlert, reply: { records: [] } },
   noRecentCall, { match: byTask, reply: { records: [] } }, patch204, delete204
 ];
 const created201 = { json: { id: "00QHOME000000001AA" }, status: 201 };
@@ -2506,7 +2524,12 @@ await runTest("aligned: refused care home value retried without it and reported"
   check(posts[1] && !("Care_Home__c" in posts[1].body), "retry leaves the refused field out");
   check(posts[1]?.body.LeadSource === "Phone Enquiry", "and keeps the fields that were fine");
   check(forwardedCallTask()?.WhoId === "00QHOME000000001AA", "the enquiry still has its Lead");
-  check(webhookTexts().some(t => t.includes("Care_Home__c")), "someone is told the home was not set");
+  check(webhookTexts().some(t => t.includes("Care_Home__c")), "the refusal reaches the integration's own reports");
+  const missing = integrationAlerts().find(a => a.Subject === "3CX Integration Error: new enquiry is missing details");
+  check(missing?.WhoId === "00QHOME000000001AA", "staff told on the Lead itself");
+  check(missing?.OwnerId === "005xx0000012345AAA", "owned by whoever took the call");
+  check((missing?.Description || "").includes('Care home (Care_Home__c) not set') && missing.Description.includes('"Arbour Walk"'),
+    "saying which field and value, in words staff can act on");
 
   // The next enquiry from the same home does not offer the refused value again.
   calls = [];
@@ -2518,7 +2541,9 @@ await runTest("aligned: refused care home value retried without it and reported"
     SALESFORCE_EXTRA_FIELDS: '{"Lead":{"LeadSource":"Phone Enquiry"}}', ALERT_WEBHOOK_URL: "https://hooks.example/alert" }, ctx2);
   await Promise.all(ctx2.tasks);
   check(leadPosts().length === 1 && !("Care_Home__c" in leadPosts()[0].body), "refused value not sent again");
-  check(webhookTexts().length === 0, "and not reported again");
+  check(!webhookTexts().some(t => t.includes("Salesforce refused")), "the integration's report is not repeated");
+  check(integrationAlerts().some(a => a.Subject === "3CX Integration Error: new enquiry is missing details" && a.WhoId === "00QHOME000000001AA"),
+    "but staff are still told on this Lead, since it needs the home setting too");
 });
 
 // A5: a refused Lead Source value (not added to the picklist yet) is handled the same way
@@ -2590,6 +2615,9 @@ await runTest("aligned: a field set aside is reported even if the retry fails", 
   await Promise.all(ctx.tasks);
   check(webhookTexts().some(t => t.includes("Home_Hidden__c")), "the unwritable field is reported");
   check(!forwardedCallTask()?.WhoId, "the enquiry itself still logged unlinked");
+  const unlinked = integrationAlerts().find(a => a.Subject === "3CX Integration Error: enquiry call saved without a record");
+  check((unlinked?.Description || "").includes("Home_Hidden__c") && unlinked.Description.includes("Edit access"),
+    "staff alert explains the field problem as well");
 });
 
 // A6: a field the org has not built is left off every later insert
@@ -2610,6 +2638,8 @@ await runTest("aligned: a missing home field is set aside after one refusal", as
   await worker.fetch(enquiryCall(), missingEnv, ctx);
   await Promise.all(ctx.tasks);
   check(leadPosts().length === 1 && !("Home_Not_Built__c" in leadPosts()[0].body), "next enquiry does not send it at all");
+  check(!integrationAlerts().some(a => a.Subject === "3CX Integration Error: new enquiry is missing details"),
+    "and staff are not told again on every Lead about a field only an admin can fix");
 });
 
 // A7: 3CX found no Salesforce user, so the call log, and its reminder, go to the fallback owner
@@ -2803,6 +2833,31 @@ await runTest("aligned: tracked enquiry with no record raises an alert", async (
   const text = webhookTexts().join("\n");
   check(text.includes("could not be given a Salesforce record"), "alert raised");
   check(text.includes("queue 800") && !text.includes("7911123456"), "names the queue, masks the number");
+
+  const alert = integrationAlerts().find(a => a.Subject === "3CX Integration Error: enquiry call saved without a record");
+  check(!!alert && !alert.WhoId, "staff alert raised in Salesforce on its own");
+  check(alert?.OwnerId === "005xx0000012345AAA", "owned by whoever took the call");
+  const d = alert?.Description || "";
+  check(d.includes("Caller: +447911123456") && d.includes("Arbour Walk queue 800") && d.includes("ext 102"),
+    "with the whole number, the home, the queue and the extension, since it stays inside Salesforce");
+  check(d.includes("find or create their record, and link the call log to it"), "and what to do");
+});
+
+// A12a: staff alerts go to the fallback owner when 3CX found no user
+await runTest("aligned: staff alert follows the fallback owner", async () => {
+  routes = [
+    tokenRoute,
+    { match: r => r.method === "GET" && r.url.includes("FROM+User"), reply: { records: [{ Id: "005FALLBACK0003AAA" }] } },
+    { match: byAccountPhone, reply: { status: 500, json: [{ errorCode: "SERVER_ERROR" }] } },
+    { match: taskPost, reply: { json: { id: "00TUNLINKED000002A" }, status: 201 } }
+  ];
+  const body = callTaskBody(standIn);
+  delete body.OwnerId;
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(body, tracked({ "X-Queue-Extension": "800" })),
+    { ...homeEnv, SALESFORCE_FALLBACK_OWNER: "005FALLBACK0003AAA" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(integrationAlerts()[0]?.OwnerId === "005FALLBACK0003AAA", "alert owned by the fallback owner");
 });
 
 // A12b: that alert is not sent when the call log was not saved either
@@ -2819,6 +2874,10 @@ await runTest("aligned: no 'saved unlinked' alert when the call log also failed"
   const texts = webhookTexts();
   check(!texts.some(t => t.includes("was saved without one")), "does not claim the call log was saved");
   check(texts.some(t => t.includes("call log not saved")), "reports that it was not");
+  check(!integrationAlerts().some(a => a.Subject === "3CX Integration Error: enquiry call saved without a record"),
+    "no staff alert claiming it was saved");
+  check(integrationAlerts().some(a => a.Subject === "3CX Integration Error: call could not be saved" &&
+    (a.Description || "").includes("+447911123456")), "a 'could not be saved' alert is attempted in Salesforce");
 });
 
 // A13: the login URL must be the org's My Domain
@@ -2837,6 +2896,69 @@ await runTest("aligned: generic Salesforce login hosts refused", async () => {
   const link = await worker.fetch(new Request("https://worker.example/003RING00000001AAA"),
     { ...env, SALESFORCE_LOGIN_URL: "https://login.example.com/" }, makeCtx());
   check(link.headers.get("Location") === "https://login.example.com/003RING00000001AAA", "a trailing slash does not double up in record links");
+});
+
+// ── Surviving a Salesforce that refuses things ──────────────────────────
+// The September 2026 outage: one field the integration user could not read
+// failed the 3CX lookup, the Worker handed 3CX the error, and 3CX never
+// journaled anything. No Leads, no call logs, no transcripts, for every call.
+
+// X1: a refused lookup is answered as "nobody matched", so journaling carries on
+await runTest("outage: a refused 3CX lookup never reaches 3CX", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { status: 400, json: [{ message: "No such column 'AssistantPhone' on entity 'Contact'.", errorCode: "INVALID_FIELD" }] } },
+    { match: byPhone, reply: { records: [] } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id,AssistantPhone)", tracked()), env, makeCtx());
+  check(res.status === 200, `3CX sees a normal answer, not the error (got ${res.status})`);
+  const match = (await res.json()).searchRecords?.[0];
+  check(match?.Id === standIn, "and an unknown caller still gets a stand-in, so the call is still journaled");
+});
+
+// X2: a field the user cannot read is dropped from the query rather than failing it
+await runTest("outage: an unreadable field is dropped from the lookup query", async () => {
+  const personAccountQuery = r => r.method === "GET" && r.url.includes("FROM+Account+WHERE+IsPersonAccount");
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: personAccountQuery, reply: r => urlHas(r, "PersonOtherPhone")
+      ? { status: 400, json: [{ message: "No such column 'PersonOtherPhone' on entity 'Account'.", errorCode: "INVALID_FIELD" }] }
+      : { records: [personAccount("001BLK0000000001AA", "003BLK0000000001AA", "+447911123456")] } },
+    noBusinessContact
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)"), paEnv, makeCtx());
+  check((await res.json()).searchRecords?.[0]?.Id === "003BLK0000000001AA", "the caller is still found, on the fields that remain");
+  const queries = calls.filter(personAccountQuery);
+  check(queries.length === 2, `refused once, then asked again without it (got ${queries.length} tries)`);
+  check(!urlHas(queries[1], "PersonOtherPhone"), "second try leaves the unreadable field out");
+
+  // Remembered, so the next caller does not pay for it again.
+  calls = [];
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: personAccountQuery, reply: { records: [personAccount("001BLK0000000002AA", "003BLK0000000002AA", "+447911123457")] } },
+    noBusinessContact
+  ];
+  await worker.fetch(lookupRequest("FIND {07911123457} IN PHONE FIELDS RETURNING Contact(Id)"), paEnv, makeCtx());
+  const next = calls.filter(personAccountQuery);
+  check(next.length === 1 && !urlHas(next[0], "PersonOtherPhone"), "asked once, already without it");
+});
+
+// X3: a refusal it cannot narrow is still reported as a failure, not as "no such caller"
+await runTest("outage: an unexplained refusal is still a failure", async () => {
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byPhone, reply: { status: 500, json: [{ errorCode: "SERVER_ERROR" }] } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)"), env, makeCtx());
+  check((await res.json()).searchRecords.length === 0, "no match invented");
+  check(contactPosts().length === 0, "and nothing created on a failed query");
 });
 
 // G10 (last, since it sets the External ID aside for the rest of the run):

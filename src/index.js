@@ -51,10 +51,17 @@ const SF_API_PATH = "/services/data/v55.0";
 const PENDING_PREFIX = "PENDING_CALLER_";
 const PENDING_FIRST_NAME = "New Caller";
 const ALERT_SUBJECT_PREFIX = "Action Required:";
-// Deliberately a different prefix from the caller reminders above, so the
-// reminder upsert never overwrites an error alert and the auto-close never
-// silently clears one.
-const FAILURE_SUBJECT = "3CX Integration Error: call details could not be saved automatically";
+// Alerts for Cedar Care's own staff, raised as Salesforce Tasks for whoever
+// took the call. Deliberately a different prefix from the caller reminders
+// above, so the reminder upsert never overwrites an error alert and the
+// auto-close never silently clears one. One prefix for all of them, so a
+// list view or retention job finds every kind.
+const INTEGRATION_ERROR_PREFIX = "3CX Integration Error:";
+const FAILURE_SUBJECT = `${INTEGRATION_ERROR_PREFIX} call details could not be saved automatically`;
+const MISSING_DETAILS_SUBJECT = `${INTEGRATION_ERROR_PREFIX} new enquiry is missing details`;
+const UNLINKED_ENQUIRY_SUBJECT = `${INTEGRATION_ERROR_PREFIX} enquiry call saved without a record`;
+const UNLINKED_CALL_SUBJECT = `${INTEGRATION_ERROR_PREFIX} call saved without its caller's record`;
+const NOT_SAVED_SUBJECT = `${INTEGRATION_ERROR_PREFIX} call could not be saved`;
 const SF_TEXT_LIMIT = 30000; // Description fields hard-cap at 32,000 chars
 const DEFAULT_FIRST_NAME = "Unregistered Contact";
 
@@ -262,7 +269,31 @@ function refusedOptionalFields(errorText, objectType, optionalKeys) {
   return [...refused].map(([key, unusable]) => ({ key, unusable }));
 }
 
-/** Starts a failure report now and keeps it alive past the response (see pendingReports). */
+/**
+ * What staff are told on the record when an optional field could not be set,
+ * written for them rather than for whoever maintains the integration.
+ */
+function fieldNotice(env, key, value, unusable) {
+  const isHome = key === (env.SALESFORCE_HOME_FIELD || "").trim();
+  const what = isHome ? `Care home (${key})` : key;
+  return unusable
+    ? `${what} not set: the phone integration's Salesforce user is not allowed to fill in this field. ` +
+      `Fill it in by hand, and ask your Salesforce admin to give that user Edit access to it. Until then, ` +
+      `records from the phone system arrive without it.`
+    : `${what} not set: Salesforce would not accept "${value}" in this field. Fill it in by hand` +
+      `${isHome ? " so the record reaches the right home" : ""}, and ask your Salesforce admin to add that value to the field.`;
+}
+
+/** Adds a staff notice once, when the caller is collecting them. */
+function addNotice(notices, message) {
+  if (notices && !notices.includes(message)) notices.push(message);
+}
+
+/**
+ * Starts a report for whoever maintains the integration: the Worker logs, and
+ * ALERT_WEBHOOK_URL when one is set. Kept alive past the response (see
+ * pendingReports). Staff hear about problems through Salesforce Tasks instead.
+ */
 function queueReport(env, instanceUrl, message) {
   console.error(message);
   pendingReports.push(reportMaintenanceFailure(env, instanceUrl, null, new Error(message)));
@@ -281,13 +312,17 @@ const DUPLICATE_RULE_HEADERS = { "Sforce-Duplicate-Rule-Header": "allowSave=true
  * insert is retried without it, so the enquiry still gets its record and is
  * still routed, just less precisely.
  *
- * The refusal is reported when it happens, whatever becomes of the retry, and
- * the field or value is left off later inserts without being reported again.
+ * The refusal is reported to the integration's logs when it happens, whatever
+ * becomes of the retry, and the field or value is left off later inserts
+ * without being reported there again. Staff are told on every record that
+ * arrives without a value they can fill in by hand, through `notices`, which
+ * the caller raises as a Salesforce Task. A field the integration user cannot
+ * write is only noticed once, on the record where it was first refused.
  *
  * Returns { response, errorText }. errorText is set, and the body already
  * read, when the insert finally failed.
  */
-async function insertRecord(env, instanceUrl, objectType, body) {
+async function insertRecord(env, instanceUrl, objectType, body, notices = null) {
   const url = `${instanceUrl}${SF_API_PATH}/sobjects/${objectType}`;
   const keyField = externalIdField(env);
   const isOptional = key => !CORE_RECORD_FIELDS.has(key) && key !== keyField;
@@ -296,8 +331,11 @@ async function insertRecord(env, instanceUrl, objectType, body) {
   const payload = {};
   const skipped = [];
   for (const [key, value] of Object.entries(body)) {
-    if (isOptional(key) && (unusableFields.has(`${objectType}.${key}`) || refusedValues.has(valueKey(key, value)))) {
+    if (isOptional(key) && unusableFields.has(`${objectType}.${key}`)) {
       skipped.push(key);
+    } else if (isOptional(key) && refusedValues.has(valueKey(key, value))) {
+      skipped.push(key);
+      addNotice(notices, fieldNotice(env, key, value, false));
     } else {
       payload[key] = value;
     }
@@ -323,6 +361,7 @@ async function insertRecord(env, instanceUrl, objectType, body) {
         if (refusedValues.size >= REFUSED_VALUES_MAX) refusedValues.clear();
         refusedValues.add(valueKey(key, payload[key]));
       }
+      addNotice(notices, fieldNotice(env, key, payload[key], unusable));
       delete payload[key];
     }
     queueReport(env, instanceUrl,
@@ -669,24 +708,94 @@ async function sfWrite(env, url, options) {
  */
 async function sfQuery(env, instanceUrl, soql) {
   const run = q => sfFetch(env, `${instanceUrl}${SF_API_PATH}/query/?${new URLSearchParams({ q })}`);
-  let response = await run(soql);
+  let query = withoutBlockedFields(soql);
+  let response = await run(query);
 
-  if (!response.ok) {
+  // A field the integration user cannot read fails the whole query, and
+  // Salesforce words it exactly like a field that does not exist. Rather than
+  // report the caller as unknown, the field is dropped and the query is run
+  // again without it: a narrower match beats no match at all. Each one is
+  // remembered, so the next call does not pay for it again.
+  for (let attempts = 0; !response.ok && attempts < 4; attempts++) {
     const errorText = await response.text();
-    const withoutKey = externalIdUnusable(env, errorText) ? stripExternalIdClause(env, soql) : soql;
-    if (withoutKey === soql) {
+    const blocked = blockedFieldFrom(errorText);
+    const withoutKey = externalIdUnusable(env, errorText) ? stripExternalIdClause(env, query) : query;
+    const narrowed = blocked ? stripFieldFromSoql(withoutKey, blocked) : withoutKey;
+
+    if (narrowed === query) {
       console.error(`SOQL query failed (${response.status}): ${errorText.slice(0, 500)}`);
       return null;
     }
-    response = await run(withoutKey);
-    if (!response.ok) {
-      console.error(`SOQL query failed (${response.status}): ${(await response.text()).slice(0, 500)}`);
-      return null;
+    if (blocked && narrowed !== withoutKey) {
+      rememberBlockedField(env, instanceUrl, blocked, errorText);
     }
+    query = narrowed;
+    response = await run(query);
+  }
+
+  if (!response.ok) {
+    console.error(`SOQL query still failing after dropping unreadable fields (${response.status}).`);
+    return null;
   }
 
   const data = await response.json();
   return data.records || [];
+}
+
+// Fields Salesforce says the integration user cannot read. Dropped from every
+// later query for the life of the isolate, so one hidden field costs one
+// refused query rather than one per call. Cleared by a deploy or a restart,
+// which is when a permission fix takes effect anyway.
+const blockedFields = new Set();
+
+/** The field named by an "unreadable or missing field" error, if that is what it is. */
+function blockedFieldFrom(errorText) {
+  if (!/INVALID_FIELD|No such column|does not exist|not accessible/i.test(errorText)) return "";
+  const named = errorText.match(/No such column '([A-Za-z0-9_]+)'/i) ||
+                errorText.match(/\bfield '([A-Za-z0-9_]+)'/i);
+  return named ? named[1] : "";
+}
+
+function rememberBlockedField(env, instanceUrl, field, errorText) {
+  if (blockedFields.has(field)) return;
+  blockedFields.add(field);
+  queueReport(env, instanceUrl,
+    `${field} cannot be read by the integration user, so it is left out of lookups until the Worker restarts. ` +
+    `Callers are still matched on the fields that remain. Grant the integration user Read on ${field} to restore it. ` +
+    `Salesforce said: ${errorText.slice(0, 200)}`);
+}
+
+/** The query with every already-known blocked field taken out. */
+function withoutBlockedFields(soql) {
+  let query = soql;
+  for (const field of blockedFields) query = stripFieldFromSoql(query, field);
+  return query;
+}
+
+/**
+ * Takes one field out of a SOQL query: out of the SELECT list, and out of any
+ * `Field = '…'` or `Field IN (…)` term, tidying up the OR or AND that joined
+ * it. Returns the query unchanged when the field is not in it, or when
+ * dropping it would leave a SELECT or a WHERE with nothing in it.
+ */
+function stripFieldFromSoql(soql, field) {
+  if (!/^[A-Za-z0-9_]+$/.test(field) || !new RegExp(`\\b${field}\\b`).test(soql)) return soql;
+
+  const parts = soql.match(/^(SELECT\s+)([\s\S]*?)(\s+FROM\s[\s\S]*)$/i);
+  if (!parts) return soql;
+
+  const selected = parts[2].split(",").map(f => f.trim()).filter(f => f.toLowerCase() !== field.toLowerCase());
+  if (selected.length === 0) return soql;
+
+  let rest = parts[3]
+    .replace(new RegExp(`\\b${field}\\s*(?:=\\s*'[^']*'|IN\\s*\\([^)]*\\))\\s*(?:OR|AND)\\s+`, "gi"), "")
+    .replace(new RegExp(`\\s*(?:OR|AND)\\s+\\b${field}\\s*(?:=\\s*'[^']*'|IN\\s*\\([^)]*\\))`, "gi"), "");
+
+  // A WHERE left holding nothing, or still naming the field (a lone term, or
+  // one this does not understand), is not worth guessing at.
+  if (new RegExp(`\\b${field}\\b`).test(rest) || /WHERE\s*\(?\s*(?:\)|ORDER|LIMIT|$)/i.test(rest)) return soql;
+
+  return `${parts[1]}${selected.join(", ")}${rest}`;
 }
 
 /**
@@ -1225,11 +1334,29 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
     headers: forwardHeaders
   });
 
-  if (!response.ok) {
-    return response;
+  // Salesforce refusing this search must never reach 3CX. 3CX treats an error
+  // from a lookup as the lookup failing, and a call whose lookup failed is
+  // never journaled at all: no call log, no transcript, no record, for every
+  // caller. One field the integration user cannot read is enough to do it.
+  // Treated as "nobody found" instead, so the Worker's own lookup still runs
+  // and a tracked enquiry still gets its stand-in and its call log.
+  let data = { searchRecords: [] };
+  // 200 even when Salesforce refused, since an empty answer is what 3CX is
+  // being given.
+  const lookupStatus = response.ok ? response.status : 200;
+  if (response.ok) {
+    data = await response.json();
+  } else {
+    const errorText = await response.text();
+    console.error(`Salesforce refused the 3CX lookup (${response.status}), continuing as if nobody matched: ` +
+      `${errorText.slice(0, 300)}`);
+    const blocked = blockedFieldFrom(errorText);
+    if (blocked) {
+      rememberBlockedField(env, new URL(targetUrl).origin, blocked, errorText);
+      console.error(`The 3CX template is asking Salesforce for ${blocked}, which the integration user cannot read. ` +
+        `Grant it Read on ${blocked}, or take that field out of the template's lookup scenarios.`);
+    }
   }
-
-  const data = await response.json();
 
   // If search records are empty
   if (!data.searchRecords || data.searchRecords.length === 0) {
@@ -1246,7 +1373,7 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
       // EntityId is blank, so the transcript never reaches Salesforce.
       if (isFilteredNumber(phone, requestHeaders)) {
         console.log(`Filtered number ${maskPhone(phone)} — no record created, journaling suppressed.`);
-        return jsonResponse(data, response.status);
+        return jsonResponse(data, lookupStatus);
       }
 
       if (/[0-9]{4,}/.test(phone)) {
@@ -1310,7 +1437,7 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
   }
 
   // Otherwise, return original Salesforce results (which will be empty, skipping call logging)
-  return jsonResponse(data, response.status);
+  return jsonResponse(data, lookupStatus);
 }
 
 /**
@@ -1518,7 +1645,8 @@ async function createPersonAccountDeduped(env, instanceUrl, phone, names = null)
     ...extraFields(env, "Account"),
     ...(names && names.fields)
   }, `SELECT ${PERSON_ACCOUNT_FIELDS} FROM Account WHERE IsPersonAccount = true AND (` +
-     `${identityMatchClause(env, ["Phone", "PersonMobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
+     `${identityMatchClause(env, ["Phone", "PersonMobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone,
+     names && names.notices);
 }
 
 async function createLeadDeduped(env, instanceUrl, phone, names = null) {
@@ -1533,7 +1661,8 @@ async function createLeadDeduped(env, instanceUrl, phone, names = null) {
     ...extraFields(env, "Lead"),
     ...(names && names.fields)
   }, `SELECT ${LEAD_FIELDS} FROM Lead WHERE IsConverted = false AND (` +
-     `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone);
+     `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ORDER BY CreatedDate ASC, Id ASC`, phone,
+     names && names.notices);
 }
 
 /** Opening lines of a record created when the phone rang (templates older than v46). */
@@ -1581,7 +1710,7 @@ function identityMatchClause(env, fields, phone) {
  * to create-then-converge — a misconfigured field name must not stop
  * records being created at all.
  */
-async function upsertByExternalId(env, instanceUrl, objectType, field, phone, body, convergeSoql) {
+async function upsertByExternalId(env, instanceUrl, objectType, field, phone, body, convergeSoql, notices = null) {
   // Read the record's own fields back by key rather than through
   // convergeSoql, which matches on phone variants and can miss the very
   // record the key just found.
@@ -1636,7 +1765,7 @@ async function upsertByExternalId(env, instanceUrl, objectType, field, phone, bo
   }
 
   // Genuinely absent: insert, carrying the key.
-  const { response: created, errorText } = await insertRecord(env, instanceUrl, objectType, { ...body, [field]: phone });
+  const { response: created, errorText } = await insertRecord(env, instanceUrl, objectType, { ...body, [field]: phone }, notices);
 
   if (created.ok) {
     const id = (await created.json().catch(() => ({}))).id || null;
@@ -1655,6 +1784,11 @@ async function upsertByExternalId(env, instanceUrl, objectType, field, phone, bo
     queueReport(env, instanceUrl,
       `Created ${objectType} ${id} but could not read it back, so its call is logged without it. If an assignment ` +
       `rule moves new ${objectType}s to other owners, the integration user needs View All and Modify All on ${objectType}.`);
+    addNotice(notices,
+      `A ${objectType} was created for this caller (${id}), but the phone integration's Salesforce user cannot see it, ` +
+      `so the call could not be linked to it. Link the call log to that ${objectType} by hand, and ask your Salesforce ` +
+      `admin to give the integration user View All and Modify All on ${objectType}s, since an assignment rule moves ` +
+      `new ones to owners it cannot see.`);
     return null;
   }
 
@@ -1684,11 +1818,11 @@ async function upsertByExternalId(env, instanceUrl, objectType, field, phone, bo
  * Used when no External ID field is configured. Convergence closes the race
  * after the fact; an External ID field prevents it happening at all.
  */
-async function createRecordDeduped(env, instanceUrl, objectType, body, convergeSoql, phone) {
+async function createRecordDeduped(env, instanceUrl, objectType, body, convergeSoql, phone, notices = null) {
   if (externalIdField(env) && phone) {
     const field = externalIdField(env);
     const upserted = await upsertByExternalId(
-      env, instanceUrl, objectType, field, phone, { ...body, [field]: phone }, convergeSoql);
+      env, instanceUrl, objectType, field, phone, { ...body, [field]: phone }, convergeSoql, notices);
     if (upserted) return upserted;
     console.error(`Falling back to create-then-converge for ${objectType}.`);
   }
@@ -1698,7 +1832,7 @@ async function createRecordDeduped(env, instanceUrl, objectType, body, convergeS
   // fallback row written without it sits outside the guarantee entirely.
   const field = externalIdField(env);
   const { response, errorText } = await insertRecord(env, instanceUrl, objectType,
-    field && phone ? { ...body, [field]: phone } : body);
+    field && phone ? { ...body, [field]: phone } : body, notices);
 
   if (!response.ok) {
     console.error(`Failed to create Salesforce ${objectType}: ${response.status} - ${errorText.slice(0, 500)}`);
@@ -1763,7 +1897,7 @@ async function createRingTimeContact(env, instanceUrl, phone, names = null) {
     Phone: phone,
     Description: names ? names.description : ringTimeDescription(),
     ...(names && names.fields)
-  });
+  }, names && names.notices);
 }
 
 /**
@@ -2050,8 +2184,19 @@ function enquiryName(env, call, queueExtension, phone) {
     firstName: home || "Phone",
     lastName: `Enquiry ${phone} (${ukDate().replace(/ \d{4}$/, "")} ${call.callTime})`,
     description: `New enquiry${through ? ` through ${through}` : ""}\n${ukDate()} at ${call.callTime}`,
-    fields: homeFields(env, departmentName(env, call, queueExtension))
+    fields: homeFields(env, departmentName(env, call, queueExtension)),
+    // Anything staff need to finish by hand, raised as a Task once the call is logged.
+    notices: []
   };
+}
+
+/** A call described for an alert staff read: the caller's number, and when and where it came in. */
+function callSummary(env, call, queueExtension = "") {
+  const home = homeForCall(env, call, queueExtension);
+  const through = queueExtension ? `${home ? `${home} ` : ""}queue ${queueExtension}, ` : (home ? `${home}, ` : "");
+  const who = call.agent && call.agent !== "Unknown" ? `ext ${call.agent}` : "unknown extension";
+  return `Caller: ${call.phone || "number not known"}\n` +
+    `Call: ${ukDate()} ${call.callTime}, ${directionLabel(call.direction)}, ${through}${who}`;
 }
 
 /**
@@ -2204,7 +2349,7 @@ async function resolveJournaledRecord(env, instanceUrl, whoId) {
 async function findContactByPhone(env, instanceUrl, phone) {
   const records = await sfQuery(env, instanceUrl,
     `SELECT Id, FirstName, LastName, Phone, Email, Description FROM Contact WHERE (` +
-    `${identityMatchClause(env, ["Phone", "MobilePhone", "HomePhone", "OtherPhone"], phone)}) ` +
+    `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ` +
     `ORDER BY CreatedDate ASC, Id ASC`);
 
   if (records && records.length > 0) {
@@ -2234,11 +2379,11 @@ async function findContactByPhone(env, instanceUrl, phone) {
  * this number. If a concurrent call won the create race, our fresh record
  * (which has no tasks attached yet) is deleted and the winner is used.
  */
-async function createContactDeduped(env, instanceUrl, phone, contactBody) {
+async function createContactDeduped(env, instanceUrl, phone, contactBody, notices = null) {
   return createRecordDeduped(env, instanceUrl, "Contact", { ...contactBody, ...extraFields(env, "Contact") },
     `SELECT Id, FirstName, LastName, Phone, Email, Description FROM Contact WHERE (` +
-    `${identityMatchClause(env, ["Phone", "MobilePhone", "HomePhone", "OtherPhone"], phone)}) ` +
-    `ORDER BY CreatedDate ASC, Id ASC`, phone);
+    `${identityMatchClause(env, ["Phone", "MobilePhone"], phone)}) ` +
+    `ORDER BY CreatedDate ASC, Id ASC`, phone, notices);
 }
 
 /**
@@ -2326,19 +2471,22 @@ async function mergeIntoRecentCallTask(env, instanceUrl, whoId, taskBody, call) 
 }
 
 /**
- * Makes a background failure visible to a human.
+ * Makes a failure visible to Cedar Care's own staff, as a high priority
+ * Salesforce Task for whoever took the call (or the fallback owner): on the
+ * caller's record when there is one, or on its own when the problem is that
+ * there is no record to put it on.
  *
- * Post-journaling maintenance runs after the call log is already safe, so
- * when it fails the transcript quietly never reaches the record and nobody
- * finds out unless `wrangler tail` happened to be open at that moment.
+ * `alert` shapes it: `subject`, `guidance` (what to do about it), `detail`
+ * (what happened, for the Task; defaults to the error message) and
+ * `unlinked` (raise it even with no record).
  *
- * Two independent signals, because they fail for different reasons: a
- * webhook reaches someone even when Salesforce itself is what broke, and a
- * Salesforce task lands in the same work queue as the caller reminders when
- * the cause was a single bad field. Both are best-effort — an alert that
- * throws must never mask the original error.
+ * ALERT_WEBHOOK_URL, when set, also gets the error message. It is optional,
+ * for whoever maintains the integration, and the only signal left when
+ * Salesforce itself is down. Both are best-effort: an alert that throws must
+ * never mask the original error.
  */
-async function reportMaintenanceFailure(env, instanceUrl, whoId, error, ownerId = null) {
+async function reportMaintenanceFailure(env, instanceUrl, whoId, error, ownerId = null, alert = {}) {
+  const subject = alert.subject || FAILURE_SUBJECT;
   const stamp = new Date().toLocaleString("en-GB", { timeZone: "Europe/London" });
   const detail = `${stamp} (UK Time), Salesforce record ${whoId || "(unlinked)"}: ${error.message || error}`;
 
@@ -2347,51 +2495,51 @@ async function reportMaintenanceFailure(env, instanceUrl, whoId, error, ownerId 
       await fetch(env.ALERT_WEBHOOK_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: `${FAILURE_SUBJECT} — ${detail}`, whoId, error: `${error.message || error}` })
+        body: JSON.stringify({ text: `${subject} — ${detail}`, whoId, error: `${error.message || error}` })
       });
     } catch (e) {
       console.error("Alert webhook failed:", e.message);
     }
   }
 
-  if (!whoId) return;
+  if (!whoId && !alert.unlinked) return;
 
   try {
-    // One open error task per record. Repeated failures on the same caller
-    // update the existing alert rather than stacking a queue of identical
-    // ones, matching how the caller reminders behave.
-    const open = await sfQuery(env, instanceUrl,
-      `SELECT Id, Description FROM Task WHERE WhoId = '${whoId}' AND IsClosed = false ` +
-      `AND Subject = '${FAILURE_SUBJECT.replace(/'/g, "\\'")}' LIMIT 1`);
-
-    const guidance =
+    const guidance = alert.guidance ||
       `The call log itself was saved, with what was said on it. What may be missing is ` +
       `this call in the record's call history, the caller reminder, or both. Check the ` +
       `call activity for this number and follow it up by hand.`;
+    const taskDetail = `${stamp} (UK Time)\n${alert.detail || (error.message || error)}`;
 
-    // A repeat failure is added to the open alert rather than replacing it,
-    // so every affected call can still be traced.
-    if (open && open.length > 0) {
-      await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/Task/${open[0].Id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ Description: truncateForSalesforce(`${open[0].Description || guidance}\n\nAlso failed: ${detail}`) })
-      });
-      return;
+    // One open alert of each kind per record. Repeated failures on the same
+    // caller are added to the existing alert rather than stacking a queue of
+    // identical ones, so every affected call can still be traced.
+    if (whoId) {
+      const open = await sfQuery(env, instanceUrl,
+        `SELECT Id, Description FROM Task WHERE WhoId = '${whoId}' AND IsClosed = false ` +
+        `AND Subject = '${subject.replace(/'/g, "\\'")}' LIMIT 1`);
+      if (open && open.length > 0) {
+        await sfFetch(env, `${instanceUrl}${SF_API_PATH}/sobjects/Task/${open[0].Id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ Description: truncateForSalesforce(`${open[0].Description || guidance}\n\nAlso: ${taskDetail}`) })
+        });
+        return;
+      }
     }
 
-    const alert = {
-      Subject: FAILURE_SUBJECT,
-      Description: truncateForSalesforce(`${detail}\n\n${guidance}`),
+    const task = {
+      Subject: subject,
+      Description: truncateForSalesforce(`${taskDetail}\n\n${guidance}`),
       Status: "Not Started",
       Priority: "High",
       TaskSubtype: "Task",
-      ActivityDate: ukToday(),
-      WhoId: whoId
+      ActivityDate: ukToday()
     };
+    if (whoId) task.WhoId = whoId;
     // With the person who took the call, not the integration user nobody reads.
-    if (ownerId) alert.OwnerId = ownerId;
+    if (ownerId) task.OwnerId = ownerId;
 
-    const raised = await insertTask(env, instanceUrl, alert);
+    const raised = await insertTask(env, instanceUrl, task);
 
     // During a full Salesforce outage this attempt fails too. Say so, so the
     // logs don't imply an alert is waiting for someone when none exists.
@@ -2935,7 +3083,7 @@ async function applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate) {
 
   if (target && target.whoId) {
     taskBody.WhoId = target.whoId;
-    if (created) return { reason: `created ${target.objectType} ${target.recordId}` };
+    if (created) return { reason: `created ${target.objectType} ${target.recordId}`, notices: names.notices };
     // A record appeared since the phone rang: an earlier leg of this call
     // created it, or someone entered it. Either way it is now existing.
     return keepExistingRecordCall(env, instanceUrl, taskBody, gate, "record found at journaling");
@@ -2944,8 +3092,15 @@ async function applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate) {
   if (failed && gate.viaQueue) {
     return {
       reason: "Salesforce failed on a tracked call, logging it unlinked",
-      alert: `An enquiry from ${maskPhone(phone)} through queue ${gate.queue || call.agent} at ${call.callTime} could not be ` +
-        `given a Salesforce record, so its call log was saved without one. The Worker logs give Salesforce's reason.`
+      alert: {
+        // The webhook gets a masked number; the Task, inside Salesforce, the whole one.
+        message: `An enquiry from ${maskPhone(phone)} through queue ${gate.queue || call.agent} at ${call.callTime} could not be ` +
+          `given a Salesforce record, so its call log was saved without one. The Worker logs give Salesforce's reason.`,
+        detail: [callSummary(env, { ...call, phone }, gate.queue), ...names.notices].join("\n\n"),
+        guidance: `This enquiry's call log is saved in Salesforce, but not linked to anyone, because no record could be ` +
+          `found or created for the caller. Search for the number above, find or create their record, and link the ` +
+          `call log to it. If this keeps happening, tell your Salesforce admin.`
+      }
     };
   }
   return {
@@ -3060,11 +3215,14 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   // redaction so nothing withheld can reach a record it creates.
   const gate = trackedQueueGate(request.headers, call);
   let enquiryAlert = null;
+  let enquiryNotices = [];
   if (gate.active) {
     const decision = await applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate);
     console.log(`Tracked queues (queue ${gate.queue || "none"}, extension ${call.agent}): ${decision.reason}`);
-    // Sent once the call log is saved, since the alert says it was.
+    // Raised once the call log is saved, since they say it was, and so they
+    // can go to whoever ends up owning it.
     enquiryAlert = decision.alert || null;
+    enquiryNotices = decision.notices || [];
     if (decision.drop) {
       return jsonResponse({ success: true, errors: [], filtered: "queue" }, 201);
     }
@@ -3149,7 +3307,17 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
         ctx.waitUntil(maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBody, headerAgent));
       }
       if (enquiryAlert) {
-        ctx.waitUntil(reportMaintenanceFailure(env, instanceUrl, null, new Error(enquiryAlert)));
+        ctx.waitUntil(reportMaintenanceFailure(env, instanceUrl, null, new Error(enquiryAlert.message), taskBody.OwnerId, {
+          subject: UNLINKED_ENQUIRY_SUBJECT, detail: enquiryAlert.detail, guidance: enquiryAlert.guidance, unlinked: true
+        }));
+      }
+      if (enquiryNotices.length > 0 && whoId) {
+        ctx.waitUntil(reportMaintenanceFailure(env, instanceUrl, whoId,
+          new Error(`new record ${whoId} created without some details: ${enquiryNotices.join(" ")}`), taskBody.OwnerId, {
+            subject: MISSING_DETAILS_SUBJECT,
+            detail: enquiryNotices.join("\n\n"),
+            guidance: `This record was created from a phone enquiry, and its call is logged as normal. Only the details above are missing.`
+          }));
       }
       return response;
     }
@@ -3161,22 +3329,36 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
     const errorText = await response.text();
     console.error(`Salesforce rejected the call log (${response.status}): ${errorText.slice(0, 500)}`);
 
+    const notSaved = (status, text) => reportMaintenanceFailure(env, instanceUrl, null,
+      new Error(`call log not saved (${status}): ${text.slice(0, 300)}`), taskBody.OwnerId, {
+        subject: NOT_SAVED_SUBJECT,
+        unlinked: true,
+        detail: `${callSummary(env, call, queueExtension)}\n\nSalesforce said: ${text.slice(0, 300)}`,
+        guidance: `Salesforce refused this call's log, so the call is not recorded in Salesforce. If the caller needs ` +
+          `following up, add a note to their record by hand. If this keeps happening, tell your Salesforce admin.`
+      });
+
     if (whoId && response.status === 400) {
       delete taskBody.WhoId;
       const unlinked = await forwardTask();
       if (unlinked.ok) {
         ctx.waitUntil(reportMaintenanceFailure(env, instanceUrl, null,
-          new Error(`call log saved without its link to ${whoId}: ${errorText.slice(0, 300)}`)));
+          new Error(`call log saved without its link to ${whoId}: ${errorText.slice(0, 300)}`), taskBody.OwnerId, {
+            subject: UNLINKED_CALL_SUBJECT,
+            unlinked: true,
+            detail: `${callSummary(env, call, queueExtension)}\n\nThe call was for record ${whoId}. Salesforce said: ${errorText.slice(0, 300)}`,
+            guidance: `This call's log is saved in Salesforce, but not linked to the caller, because Salesforce would not ` +
+              `accept the record it was for. That record may have been merged or deleted since the phone rang. Find ` +
+              `the caller's current record and link the call log to it.`
+          }));
         return unlinked;
       }
       const retryText = await unlinked.text();
-      ctx.waitUntil(reportMaintenanceFailure(env, instanceUrl, null,
-        new Error(`call log not saved (${unlinked.status}): ${retryText.slice(0, 300)}`)));
+      ctx.waitUntil(notSaved(unlinked.status, retryText));
       return new Response(retryText, { status: unlinked.status, headers: { "Content-Type": "application/json" } });
     }
 
-    ctx.waitUntil(reportMaintenanceFailure(env, instanceUrl, null,
-      new Error(`call log not saved (${response.status}): ${errorText.slice(0, 300)}`)));
+    ctx.waitUntil(notSaved(response.status, errorText));
     return new Response(errorText, { status: response.status, headers: { "Content-Type": "application/json" } });
   }
 }

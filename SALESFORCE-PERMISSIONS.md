@@ -41,11 +41,11 @@ Read is enough for everything except the handful the Worker writes to, marked be
 | FirstName, LastName | Read + **Edit** |
 | Phone | Read + **Edit** |
 | Description | Read + **Edit** |
-| MobilePhone, HomePhone, OtherPhone, AssistantPhone | Read |
-| Fax, Title, Department, Email, AccountId | Read |
+| MobilePhone | Read |
+| Email, AccountId | Read |
 | IsPersonAccount | Read. The Worker uses it to tell a business Contact from a Person Account's hidden one, before raising an enquiry and when resolving which record a call belongs to |
 
-The four phone fields beyond `Phone` are all matched against when identifying a caller. Hiding any one narrows who the system can recognise.
+Callers are matched on `Phone` and `MobilePhone`. `HomePhone`, `OtherPhone`, `AssistantPhone`, `Fax`, `Title` and `Department` were taken out of the template's lookups and the Worker's queries, because Cedar Care's org hides them and a single hidden field fails the whole lookup (see the findings at the end of this page). A caller reachable only on a home or other number is no longer matched: grant those fields and put them back if that matters more than the risk.
 
 ### Account (Person Accounts)
 
@@ -146,6 +146,15 @@ done
 Anything reported BLOCKED is hidden from the run-as user and will break the feature that depends on it.
 
 ---
+
+## The 16 September 2026 outage: permissions do not follow a Run As change
+
+Cedar Care changed the External Client App's Run As user to the **Automated Process User** on 15 September. Field-level security belongs to the user, not the app, so every field granted to the previous integration user on 3 September was hidden again from the new one. Two things followed:
+
+1. The 3CX template asked for `AssistantPhone`, `HomePhone` and `OtherPhone` in its Contacts lookup. Salesforce refused the whole search, the Worker handed 3CX the error, and **3CX never journals a call whose lookup failed**. No call logs, no transcripts, no Leads, for every call.
+2. Once the template was narrowed, the Worker's own Person Account query still selected `PersonHomePhone` and `PersonOtherPhone`. In `lead` mode that query runs first for every caller, so it failed, the Worker treated Salesforce as unreachable, and calls were logged unlinked with no Lead created.
+
+Both now degrade instead of failing (see [When Salesforce refuses a field](README.md#when-salesforce-refuses-a-field)), but the fix is still to grant the fields. **After any Run As change, re-run the check in [Verifying](#verifying) and make one test call.**
 
 ## Findings: Cedar Care UAT, 3 September 2026
 
