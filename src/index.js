@@ -1432,6 +1432,20 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
         if (gated && trackedQueueList(requestHeaders).length > 0 && !outbound) {
           return pendingCallerMatch(phone);
         }
+
+        // Nothing will be created and 3CX will not journal this call. Say why:
+        // from the outside that is indistinguishable from the integration
+        // being broken, and a template whose settings were lost on re-upload
+        // looks exactly like this.
+        if (!outbound) {
+          console.warn(gated
+            ? (trackedQueueList(requestHeaders).length === 0
+                ? `Unknown caller ${maskPhone(phone)}: Tracked Queues is empty in the 3CX template, so no record is created ` +
+                  `and 3CX will not journal the call. Check Integrations → CRM; an upload can clear saved settings.`
+                : `Unknown caller ${maskPhone(phone)}: no record, and the call will not be journaled.`)
+            : `Unknown caller ${maskPhone(phone)}: the template is not sending the tracked queue headers, so the ` +
+              `pre-v46 ring-time rules apply and nothing is created.`);
+        }
       }
     }
   }
