@@ -128,6 +128,7 @@ const NEGATIVE_CACHE_MAX = 500;
  * Entries expire quickly, and any record the Worker creates clears the cache.
  */
 function isKnownEmptySearch(shape, term) {
+  if (!term) return false;
   const now = Date.now();
   for (const [key, expiry] of emptySearchTerms) {
     if (expiry < now) {
@@ -141,6 +142,7 @@ function isKnownEmptySearch(shape, term) {
 }
 
 function rememberEmptySearch(shape, term) {
+  if (!term) return;
   // Bound memory — the isolate is long-lived and terms are unbounded.
   if (emptySearchTerms.size >= NEGATIVE_CACHE_MAX) emptySearchTerms.clear();
   emptySearchTerms.set(JSON.stringify([shape, term]), Date.now() + NEGATIVE_CACHE_MS);
@@ -240,6 +242,46 @@ function diagnosticsOn(env) {
   return /^true$/i.test(String(env.SALESFORCE_DIAGNOSTICS || "").trim());
 }
 
+// Runs once per Worker instance while SALESFORCE_FIELD_CHECK is set, so the
+// answer lands in the log without anyone handling a credential.
+let fieldCheckDone = false;
+
+/**
+ * Asks Salesforce, as the integration user itself, which fields it can
+ * actually read. The UI shows what a permission set grants; this shows what
+ * the run-as user has, which is the only thing that decides whether a call
+ * gets matched, logged and written. They differ whenever the run-as user
+ * changes, because field access follows the user and not the app.
+ */
+async function runFieldCheck(env, instanceUrl) {
+  const wanted = {
+    Contact: ["Description", "MobilePhone", "IsPersonAccount", externalIdField(env)],
+    Account: ["PersonContactId", "PersonMobilePhone", "PersonHomePhone", "PersonOtherPhone", "Description", "RecordTypeId", externalIdField(env)],
+    Lead: ["Description", "MobilePhone", "IsConverted", "ConvertedContactId", (env.SALESFORCE_HOME_FIELD || "").trim(), "LeadSource", externalIdField(env)],
+    Task: ["Description", "WhoId", "OwnerId", "CallDurationInSeconds", "CreatedById"]
+  };
+
+  const blocked = [];
+  const readable = [];
+  for (const [objectType, fields] of Object.entries(wanted)) {
+    for (const field of fields.filter(Boolean)) {
+      // Deliberately not sfQuery: no field stripping, no remembering, so this
+      // reports what Salesforce says rather than what the Worker has learned.
+      const response = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/query/?` +
+        new URLSearchParams({ q: `SELECT ${field} FROM ${objectType} LIMIT 1` }));
+      if (response.ok) {
+        readable.push(`${objectType}.${field}`);
+      } else {
+        const text = await response.text();
+        blocked.push(`${objectType}.${field} (${(text.match(/"errorCode":"([A-Z_]+)"/) || [])[1] || response.status})`);
+      }
+    }
+  }
+
+  console.log(`Field check, as the integration user:\n  READABLE: ${readable.join(", ") || "none"}\n  ` +
+    `BLOCKED OR MISSING: ${blocked.join(", ") || "none"}`);
+}
+
 /** True when the template has switched the "Action Required" reminders off. */
 function remindersOff(env) {
   return /^true$/i.test(String(env.SALESFORCE_REMINDERS_OFF || "").trim());
@@ -292,8 +334,8 @@ function logRetentionDays(env) {
 
 /** Writes this request's diagnostic lines to the log store, if one is bound. */
 async function storeDiagnosticLog(env) {
-  const lines = env.__log;
-  if (!lines || lines.length === 0) return;
+  if (!env.__log || env.__log.length === 0) return;
+  const lines = env.__log.splice(0);
 
   const days = logRetentionDays(env);
   if (days === 0) return;
@@ -521,7 +563,12 @@ async function downloadDiagnosticLog(env, requestUrl) {
 function templateSettings(env, headers) {
   const read = name => (headers && headers.get ? headers.get(name) : "") || "";
   const count = value => value.split(",").map(v => v.trim()).filter(Boolean).length;
-  return `template: tracked queues ${count(read("X-Tracked-Queues"))}, receptionists ${count(read("X-Receptionist-Extensions"))}, ` +
+  // The routing lists are printed as they arrived, not just counted: a single
+  // over-broad entry such as "0*" quietly makes every person look like call
+  // routing, and a count of 1 would not show that.
+  return `template lists: tracked queues [${read("X-Tracked-Queues")}], receptionists [${read("X-Receptionist-Extensions")}], ` +
+    `excluded extensions [${read("X-Excluded-Extensions")}]\n` +
+    `template: tracked queues ${count(read("X-Tracked-Queues"))}, receptionists ${count(read("X-Receptionist-Extensions"))}, ` +
     `excluded extensions ${count(read("X-Excluded-Extensions"))}, excluded prefixes ${count(read("X-Excluded-Prefixes"))}, ` +
     `always log existing ${read("X-Log-Existing-Always") || "(unset)"}, creates ${orgModel(env)}, ` +
     `history off for ${env.SALESFORCE_HISTORY_OFF || "nothing"}, transcripts "${read("X-Transcript-Policy") || "(unset)"}"`;
@@ -812,7 +859,7 @@ const requestHandler = {
       // A stand-in has no record yet, so open the list for the object the
       // Worker would create instead of a record page that does not exist.
       if (isPendingCallerId(salesforceId)) {
-        const home = { contact: "Contact", personaccount: "Account", lead: "Lead" }[orgModel(env)];
+        const home = { contact: "Contact", personaccount: "Account", lead: "Lead" }[orgModel(env)] || "Lead";
         return Response.redirect(`${trimmedLoginUrl(env)}/lightning/o/${home}/home`, 302);
       }
       return Response.redirect(`${trimmedLoginUrl(env)}/${salesforceId}`, 302);
@@ -849,6 +896,15 @@ const requestHandler = {
       //    rather than when the cached token next expires.
       salesforceLoginUrl(env);
       const { accessToken, instanceUrl } = await getSalesforceToken(env);
+
+      // A one-off answer to "has the run-as user got the fields it needs",
+      // written to the log after the response so no call waits for it.
+      if (!fieldCheckDone && /^true$/i.test(String(env.SALESFORCE_FIELD_CHECK || "").trim())) {
+        fieldCheckDone = true;
+        if (ctx && typeof ctx.waitUntil === "function") {
+          ctx.waitUntil(runFieldCheck(env, instanceUrl).catch(e => console.error("Field check failed:", e.message)));
+        }
+      }
 
       // Set when this request is a 3CX search-as-you-type query, so the
       // result can be learned from once Salesforce answers.
@@ -1519,7 +1575,7 @@ function trackedQueueGate(headers, call) {
   const captureMissed = !/^false$/i.test((headers.get("X-Capture-Missed") || "True").trim());
   const missed = viaQueue && captureMissed && /Inbound Missed/.test(call.direction || "");
 
-  return { active: true, queue, viaQueue, answered, missed, create: answered || missed, logExisting };
+  return { active: true, queue, viaQueue, agentIsRouting, answered, missed, create: answered || missed, logExisting };
 }
 
 /**
@@ -1533,7 +1589,17 @@ function trackedQueuesConfigured(headers) {
 }
 
 function trackedQueueList(headers) {
-  return (headers.get("X-Tracked-Queues") || "").split(",").map(v => v.trim()).filter(Boolean);
+  return extensionList(headers.get("X-Tracked-Queues"));
+}
+
+/**
+ * A comma separated template setting as a list. Entries 3CX left as
+ * placeholders are dropped: a literal "[TrackedQueues]" would otherwise count
+ * as a configured queue that matches nothing, and every enquiry would be
+ * dropped for want of a queue that could never match.
+ */
+function extensionList(value) {
+  return String(value || "").split(",").map(v => v.trim()).filter(v => v && !v.startsWith("["));
 }
 
 function isPendingCallerId(id) {
@@ -1686,7 +1752,8 @@ function shouldJournalDirection(direction, headers) {
  * survives, so the activity history stays useful even when the words don't.
  */
 function applyTranscriptPolicy(description, direction, headers) {
-  const policy = (headers.get("X-Transcript-Policy") || "Include full transcript").trim();
+  const sent = (headers.get("X-Transcript-Policy") || "").trim();
+  const policy = !sent || sent.startsWith("[") ? "Include full transcript" : sent;
   if (policy === "Include full transcript") return description;
   if (policy === "External inbound only" && direction.includes("Inbound")) return description;
 
@@ -1711,7 +1778,7 @@ function applyTranscriptPolicy(description, direction, headers) {
  */
 function isConfidentialExtension(headers, agent) {
   const csv = (headers && headers.get ? headers.get("X-Confidential-Extensions") : "") || "";
-  return matchesExtension(csv.split(",").map(v => v.trim()).filter(Boolean), agent);
+  return matchesExtension(extensionList(csv), agent);
 }
 
 function redactCallContent(description) {
@@ -2507,7 +2574,7 @@ function parseCallDetails(description) {
 
   // Ignore names the Worker itself stamped on auto-created contacts — 3CX
   // echoes the matched contact's display name back into the description.
-  if (threeCxName && /Unsaved Contact|Unregistered Contact|\(Unsaved|Unverified|\bEnquiry\s+[+\d][\d\s]*\(/i.test(threeCxName)) {
+  if (threeCxName && new RegExp(`Unsaved Contact|${DEFAULT_FIRST_NAME}|${PENDING_FIRST_NAME}|\\(Unsaved|Unverified|\\bEnquiry\\s+[+\\d][\\d\\s]*\\(`, "i").test(threeCxName)) {
     threeCxName = "";
   }
 
@@ -2550,10 +2617,7 @@ function parseCallDetails(description) {
  */
 function routingExtensionList(headers) {
   const read = (name) => (headers && headers.get ? headers.get(name) || "" : "");
-  return `${read("X-Receptionist-Extensions")},${read("X-Tracked-Queues")}`
-    .split(",")
-    .map(v => v.trim())
-    .filter(Boolean);
+  return extensionList(`${read("X-Receptionist-Extensions")},${read("X-Tracked-Queues")}`);
 }
 
 /**
@@ -2579,10 +2643,7 @@ function isRoutingExtension(routing, agent) {
 /** Tracked queues and receptionist menus, kept apart so a call's history can name each. */
 function routingLists(headers) {
   const read = (name) => (headers && headers.get ? headers.get(name) || "" : "");
-  return {
-    queues: read("X-Tracked-Queues").split(",").map(v => v.trim()).filter(Boolean),
-    menus: read("X-Receptionist-Extensions").split(",").map(v => v.trim()).filter(Boolean)
-  };
+  return { queues: extensionList(read("X-Tracked-Queues")), menus: extensionList(read("X-Receptionist-Extensions")) };
 }
 
 /**
@@ -2595,8 +2656,7 @@ function routingLists(headers) {
  */
 function isExcludedExtension(headers, ...extensions) {
   const csv = (headers && headers.get ? headers.get("X-Excluded-Extensions") : "") || "";
-  const list = csv.split(",").map(v => v.trim()).filter(Boolean);
-  return extensions.some(ext => matchesExtension(list, ext));
+  return extensions.some(ext => matchesExtension(extensionList(csv), ext));
 }
 
 /**
@@ -2660,17 +2720,30 @@ async function refreshHomeDirectory(env) {
     const names = new Map(departments.filter(d => d.Name && !d.IsDefault).map(d => [d.Id, d.Name]));
 
     const directory = new Map();
+    const queues = [];
     for (const collection of ["Users", "Queues"]) {
-      const members = await read(`${collection}?$select=Number&$expand=Groups`, `${collection}?$select=Number,Groups`);
+      const members = await read(`${collection}?$select=Number,Name&$expand=Groups`,
+        `${collection}?$select=Number&$expand=Groups`, `${collection}?$select=Number,Groups`);
       for (const member of members) {
         const home = (member.Groups || []).map(g => names.get(g.GroupId)).find(Boolean);
         if (member.Number && home) directory.set(String(member.Number), home);
+        if (collection === "Queues" && member.Number) {
+          queues.push(`${member.Number} ${member.Name ? `"${member.Name}"` : "(unnamed)"}${home ? ` — ${home}` : ""}`);
+        }
       }
     }
 
     homeDirectory = directory;
     homeDirectoryExpiry = Date.now() + HOME_DIRECTORY_MS;
     console.log(`Read ${directory.size} extensions and queues across ${names.size} 3CX departments.`);
+
+    // Every queue by number and name, once an hour. Which queues carry new
+    // enquiries is the one thing the Worker cannot work out for itself, and
+    // a Tracked Queues list that names the wrong ones drops every enquiry
+    // while looking perfectly healthy.
+    if (queues.length > 0) {
+      console.log(`3CX queues (put the enquiry ones in Tracked Queues):\n  ${queues.sort().join("\n  ")}`);
+    }
   } catch (error) {
     console.error(`Could not read home names from 3CX, keeping the last known ones: ${error.message}`);
   }
@@ -3484,6 +3557,11 @@ async function maintainJournaledRecord(env, routing, instanceUrl, whoId, taskBod
   } catch (error) {
     console.error("Record/alert maintenance failed:", error);
     await reportMaintenanceFailure(env, instanceUrl, whoId, error, taskBody.OwnerId);
+  } finally {
+    // This runs after the response, so the request's own flush has already
+    // been and gone. Anything raised here finishes here.
+    if (pendingReports.length > 0) await Promise.all(pendingReports.splice(0)).catch(() => {});
+    await storeDiagnosticLog(env);
   }
 }
 
@@ -3790,7 +3868,19 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
         }
       };
     }
-    console.log(`Tracked queues (queue ${gate.queue || "none"}, extension ${call.agent}): ${decision.reason}`);
+    // The facts behind the decision, always, not only under diagnostics:
+    // "not answered through a tracked queue" covers a queue that is not in
+    // the list, an extension the template counts as routing furniture, and a
+    // direction that does not qualify, and they need different fixes.
+    console.log(`Tracked queues (queue ${gate.queue || "none"}, extension ${call.agent}): ${decision.reason} ` +
+      `[queue in list: ${gate.viaQueue}, extension counts as routing: ${gate.agentIsRouting}, ` +
+      `direction: ${call.direction}, answered: ${gate.answered}, missed enquiry: ${gate.missed}]`);
+    // Which of the four conditions decided it. Without this, "not answered
+    // through a tracked queue" covers a queue that is not listed, an
+    // extension the template counts as routing, and a direction that does
+    // not qualify, and they need different fixes.
+    diag(env, `gate: queue ${gate.queue || "none"} listed=${gate.viaQueue}, agent ${call.agent} counts as routing=${gate.agentIsRouting}, ` +
+      `direction "${call.direction}", answered=${gate.answered}, missed enquiry=${gate.missed}, creates=${gate.create}`);
     diag(env, `decision: ${decision.reason}`);
     // Raised once the call log is saved, since they say it was, and so they
     // can go to whoever ends up owning it.

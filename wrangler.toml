@@ -72,6 +72,9 @@ SALESFORCE_EXTERNAL_ID_FIELD = "Phone_E164__c"
 # queue it came through, so Cedar Care's Lead assignment rule can route it.
 # A value the field refuses costs the field, not the Lead.
 SALESFORCE_HOME_FIELD = "Care_Home__c"
+# Set SALESFORCE_FIELD_CHECK = "true" here and deploy to have the Worker log
+# which fields the run-as user can actually read, once per instance. Left off
+# so calls are not paying for the extra queries.
 # The PBX whose departments name the homes. Its API client id and secret are
 # the THREECX_CLIENT_ID and THREECX_CLIENT_SECRET secrets.
 THREECX_URL = "https://cedarcare.my3cx.uk"
