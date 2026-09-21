@@ -482,7 +482,7 @@ await runTest("filtering: excluded number's call log dropped at journaling", asy
   const res = await worker.fetch(taskRequest(
     callTaskBody("003SISTER00001AAA",
       "17/07/2026 15:00: Answered incoming call from 01632960004  to 102 (00:01:20)\n\nTranscription: internal handover about a resident\n\nSummary: Internal\n\nSentiment: Neutral"),
-    { "X-Excluded-Prefixes": "01179" }), env, ctx);
+    { "X-Excluded-Prefixes": "01632" }), env, ctx);
   await Promise.all(ctx.tasks);
   const body = await res.json();
   check(res.status === 201 && body.filtered === "number", "task dropped as filtered");

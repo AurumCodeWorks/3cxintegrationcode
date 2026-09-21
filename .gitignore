@@ -9,3 +9,8 @@ dist/
 *.log
 *.bak
 .DS_Store
+
+# Customer data: number lists live with the customer, not in a code repository
+ddi-*.csv
+ddi-*.txt
+*-excluded-prefixes.txt
