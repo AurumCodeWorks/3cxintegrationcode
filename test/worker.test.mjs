@@ -3305,6 +3305,167 @@ await runTest("outage: an unexplained refusal is still a failure", async () => {
   check(contactPosts().length === 0, "and nothing created on a failed query");
 });
 
+// ── What the September review found ─────────────────────────────────────
+
+// V1: a lookup that throws must still answer 3CX, or the call is never journaled
+await runTest("review: a thrown lookup still answers 3CX", async () => {
+  // A token refresh failing mid-outage: the commonest way this throws.
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { status: 401, json: [{ errorCode: "INVALID_SESSION_ID" }] } },
+    { match: r => r.url.includes("/oauth2/token"), reply: { status: 503, json: { error: "server_error" } } }
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)", tracked()), env, makeCtx());
+  check(res.status === 200, `3CX gets a normal answer, not 502 (got ${res.status})`);
+  check((await res.json()).searchRecords?.[0]?.Id === standIn, "and a stand-in, so the call is still journaled");
+
+  // A dropped connection, which Workers do routinely.
+  calls = [];
+  routes = [{ match: r => r.url.includes("/oauth2/token"), reply: { access_token: "t", instance_url: SF } },
+    { match: sfSearch, reply: () => { throw new Error("Network connection lost."); } }];
+  const dropped = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)", tracked()), env, makeCtx());
+  check(dropped.status === 200, "a dropped connection is answered too");
+
+  // Outbound gets nothing rather than a stand-in, as always.
+  calls = [];
+  routes = [{ match: r => r.url.includes("/oauth2/token"), reply: { access_token: "t", instance_url: SF } },
+    { match: sfSearch, reply: () => { throw new Error("Network connection lost."); } }];
+  const outbound = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)",
+      tracked({ "X-Call-Direction": "Outbound" })), env, makeCtx());
+  check((await outbound.json()).searchRecords.length === 0, "and an outbound lookup still gets nothing");
+});
+
+// V2: the template's own SOQL lookups degrade the same way
+await runTest("review: a refused template query is answered with nothing", async () => {
+  routes = [tokenRoute, { match: r => r.method === "GET" && r.url.includes("/query/"),
+    reply: { status: 400, json: [{ message: "No such column 'Fax' on entity 'Account'.", errorCode: "INVALID_FIELD" }] } }];
+  const res = await worker.fetch(new Request(
+    `https://worker.example/services/data/v55.0/query/?q=${encodeURIComponent("SELECT Name from Account where Id = '001x'")}`,
+    { headers: { "X-Proxy-API-Key": "secret" } }), env, makeCtx());
+  check(res.status === 200, `3CX gets 200, not the refusal (got ${res.status})`);
+  check((await res.json()).totalSize === 0, "and an empty result");
+});
+
+// V3: a decision that throws keeps the call log
+await runTest("review: a failed tracked queue decision keeps the call unlinked", async () => {
+  routes = [
+    tokenRoute,
+    { match: hook, reply: { ok: true } },
+    { match: byAccountPhone, reply: () => { throw new Error("Network connection lost."); } },
+    { match: taskPost, reply: { json: { id: "00TTHROWN000001AAA" }, status: 201 } },
+    { match: openIntegrationAlert, reply: { records: [] } }
+  ];
+  const ctx = makeCtx();
+  const res = await worker.fetch(taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" })),
+    { ...homeEnv, ALERT_WEBHOOK_URL: "https://hooks.example/alert" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(res.status === 201 && forwardedCallTask() && !forwardedCallTask().WhoId, "the call log is saved, unlinked");
+  check(integrationAlerts().some(a => (a.Description || "").includes("could not finish deciding")), "and staff are told why");
+});
+
+// V4: a Person Account whose PersonContactId cannot be read is not silently dropped
+await runTest("review: an unlinkable Person Account is reported, not dropped", async () => {
+  routes = [
+    tokenRoute,
+    { match: hook, reply: { ok: true } },
+    { match: byAccountPhone, reply: { records: [{ Id: "001NOPC000000001AA", FirstName: "Jean", LastName: "Smith", Phone: "+447911123456" }] } },
+    { match: taskPost, reply: { json: { id: "00TNOPC0000001AAA" }, status: 201 } },
+    { match: openIntegrationAlert, reply: { records: [] } }
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), tracked({ "X-Queue-Extension": "800" })),
+    { ...homeEnv, ALERT_WEBHOOK_URL: "https://hooks.example/alert" }, ctx);
+  await Promise.all(ctx.tasks);
+  check(forwardedCallTask() && !forwardedCallTask().WhoId, "the call is logged unlinked rather than dropped");
+  check(integrationAlerts().length > 0, "and an alert is raised");
+});
+
+// V5: only 3CX may set the log download key
+await runTest("review: the log download key cannot be planted", async () => {
+  const store = new Map();
+  const kv = {
+    put: async (k, v, o) => { store.set(k, { value: v, options: o }); },
+    get: async (k) => (store.get(k) || {}).value,
+    delete: async (k) => { store.delete(k); },
+    list: async ({ prefix, limit }) => ({ keys: [...store.keys()].filter(k => k.startsWith(prefix)).sort().slice(0, limit).map(name => ({ name })), list_complete: true })
+  };
+  const keyEnv = { ...plainEnv, DIAGNOSTIC_LOGS: kv };
+
+  routes = [tokenRoute];
+  const ctx = makeCtx();
+  const planted = await worker.fetch(new Request("https://worker.example/services/data/v55.0/query/?q=SELECT+Id",
+    { headers: { "X-Log-Download-Key": "plantedbyme" } }), keyEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(planted.status === 401, "an unauthenticated request is refused");
+  check(!store.has("config:log-download-key"), "and cannot leave a key behind");
+
+  const readBack = await worker.fetch(new Request("https://worker.example/logs.txt?key=plantedbyme"), keyEnv, makeCtx());
+  check(readBack.status === 401, "so the log cannot be read with it");
+});
+
+// V6: clearing the key in 3CX revokes it
+await runTest("review: clearing the download key revokes it", async () => {
+  const store = new Map([["config:log-download-key", { value: "oldkey12" }]]);
+  const kv = {
+    put: async (k, v, o) => { store.set(k, { value: v, options: o }); },
+    get: async (k) => (store.get(k) || {}).value,
+    delete: async (k) => { store.delete(k); },
+    list: async () => ({ keys: [], list_complete: true })
+  };
+  const keyEnv = { ...plainEnv, DIAGNOSTIC_LOGS: kv };
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), toggles({ "X-Log-Download-Key": "" })), keyEnv, ctx);
+  await Promise.all(ctx.tasks);
+  check(!store.has("config:log-download-key"), "the stored key is removed");
+});
+
+// V7: the External ID is only set aside when Salesforce names it
+await runTest("review: another field's refusal does not disable the External ID", async () => {
+  const keyEnv = { ...env, SALESFORCE_EXTERNAL_ID_FIELD: "Phone_E164__c" };
+  // Salesforce quotes the whole query back, so the error mentions the
+  // External ID even though PersonOtherPhone is the problem.
+  const echoed = "\nSELECT Id, Phone_E164__c, PersonHomePhone FROM Account\n ^\nERROR at Row:1:Column:59\n" +
+    "No such column 'PersonHomePhone' on entity 'Account'.";
+  routes = [
+    tokenRoute,
+    { match: sfSearch, reply: { searchRecords: [] } },
+    { match: byAccountPhone, reply: r => urlHas(r, "PersonHomePhone")
+      ? { status: 400, json: [{ message: echoed, errorCode: "INVALID_FIELD" }] }
+      : { records: [personAccount("001KEY0000000001AA", "003KEY0000000001AA", "+447911123456")] } },
+    noBusinessContact
+  ];
+  const res = await worker.fetch(
+    lookupRequest("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)"), { ...paEnv, ...keyEnv }, makeCtx());
+  check((await res.json()).searchRecords?.[0]?.Id === "003KEY0000000001AA", "the caller is still found");
+  const retried = calls.filter(byAccountPhone).pop();
+  check(urlHas(retried, "Phone_E164__c"), "and the External ID is still being matched on");
+});
+
+// V8: a field blocked on one object is not stripped from another's query
+await runTest("review: blocked fields are remembered per object", async () => {
+  routes = [
+    tokenRoute,
+    { match: taskPost, reply: { json: { id: "00TSCOPE000001AAA" }, status: 201 } },
+    { match: byId, reply: r => urlHas(r, "Description")
+      ? { status: 400, json: [{ message: "No such column 'Description' on entity 'Contact'.", errorCode: "INVALID_FIELD" }] }
+      : { records: [{ Id: "003SCOPE00000001AA", FirstName: "Unregistered Contact", LastName: "+447911123456", Phone: "+447911123456" }] } },
+    recentCallQuery ? { match: recentCallQuery, reply: { records: [] } } : noRecentCall,
+    { match: byTask, reply: { records: [] } },
+    { match: openIntegrationAlert, reply: { records: [] } },
+    patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003SCOPE00000001AA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  const taskQueries = calls.filter(c => c.method === "GET" && urlHas(c, "FROM Task"));
+  check(taskQueries.length > 0 && taskQueries.every(q => urlHas(q, "Description")),
+    "Description blocked on Contact is still read on Task, where the merge needs it");
+});
+
 // G10 (last, since it sets the External ID aside for the rest of the run):
 // a missing or hidden key field degrades to phone matching instead of stopping creation
 await runTest("gaps: broken External ID field falls back to phone matching", async () => {

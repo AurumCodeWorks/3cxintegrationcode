@@ -394,6 +394,7 @@ const LOG_DOWNLOAD_PAGE = `<!doctype html>
 // 3CX sends it on a call.
 const DOWNLOAD_KEY_RECORD = "config:log-download-key";
 let downloadKeyWrittenAt = 0;
+let downloadKeyLastWritten = null;
 const DOWNLOAD_KEY_REFRESH_MS = 10 * 60_000;
 
 /**
@@ -413,8 +414,26 @@ function browserSafeKey(key) {
 async function rememberDownloadKey(env, headers) {
   const key = (headers && headers.get ? headers.get("X-Log-Download-Key") : "") || "";
   const value = key.trim();
-  if (!value || value.startsWith("[") || !env.DIAGNOSTIC_LOGS) return;
-  if (Date.now() - downloadKeyWrittenAt < DOWNLOAD_KEY_REFRESH_MS) return;
+  if (value.startsWith("[") || !env.DIAGNOSTIC_LOGS) return;
+
+  // Cleared in 3CX means revoked here. Without this the old key would keep
+  // working until it expired, which is not what clearing a field looks like.
+  if (!value) {
+    if (downloadKeyLastWritten === "") return;
+    try {
+      await env.DIAGNOSTIC_LOGS.delete(DOWNLOAD_KEY_RECORD);
+      downloadKeyLastWritten = "";
+      console.log("The log download key was cleared in the 3CX template, so it no longer opens the log.");
+    } catch (e) {
+      console.error("Could not clear the log download key:", e.message);
+    }
+    return;
+  }
+
+  // A changed key is written straight away; an unchanged one at most every
+  // ten minutes, so a busy PBX is not writing the same value all day.
+  const changed = value !== downloadKeyLastWritten;
+  if (!changed && Date.now() - downloadKeyWrittenAt < DOWNLOAD_KEY_REFRESH_MS) return;
 
   if (!browserSafeKey(value)) {
     console.error("The log download key set in the 3CX template cannot be used in a browser address bar. " +
@@ -423,9 +442,15 @@ async function rememberDownloadKey(env, headers) {
       "The key still works when sent as the X-Log-Download-Key header.");
   }
 
-  downloadKeyWrittenAt = Date.now();
   try {
-    await env.DIAGNOSTIC_LOGS.put(DOWNLOAD_KEY_RECORD, value);
+    // No longer than the logs it unlocks are kept for, and never more than a
+    // month, so a forgotten key does not outlive its purpose.
+    const days = Math.max(logRetentionDays(env), 1);
+    await env.DIAGNOSTIC_LOGS.put(DOWNLOAD_KEY_RECORD, value, { expirationTtl: Math.min(days, 30) * 86400 });
+    // Only once it is actually stored, so a failed write is retried rather
+    // than blocked for the next ten minutes.
+    downloadKeyWrittenAt = Date.now();
+    downloadKeyLastWritten = value;
   } catch (e) {
     console.error("Could not store the log download key:", e.message);
   }
@@ -754,7 +779,13 @@ export default {
       // them alive once the response has gone.
       if (pendingReports.length > 0) waiting.push(...pendingReports.splice(0));
       if (runtime.__log && runtime.__log.length > 0) waiting.push(storeDiagnosticLog(runtime));
-      if (request.headers.get("X-Log-Download-Key")) waiting.push(rememberDownloadKey(runtime, request.headers));
+      // Only 3CX may set the download key. Without this check any request at
+      // all could plant one and then read the log back with it, since the
+      // download is deliberately reachable without the proxy key.
+      const fromThreeCx = request.headers.get("X-Proxy-API-Key") === env.PROXY_API_KEY;
+      if (fromThreeCx && request.headers.get("X-Log-Download-Key") !== null) {
+        waiting.push(rememberDownloadKey(runtime, request.headers));
+      }
       if (waiting.length > 0 && ctx && typeof ctx.waitUntil === "function") {
         ctx.waitUntil(Promise.all(waiting));
       }
@@ -896,8 +927,19 @@ const requestHandler = {
       const isDataPath = /^\/services\/data\/v\d+\.\d+\//.test(path);
 
       // 3. Intercept Contact Lookup (Search requests)
+      //
+      // Nothing thrown in here may reach 3CX. An error answer to a lookup is
+      // not a failed lookup to 3CX, it is a call it then refuses to journal:
+      // no call log, no transcript, no recording. A token refresh that fails
+      // mid-outage, a dropped connection, a non-JSON body — all of them end
+      // up here, and all of them must come out as "nobody matched".
       if (isDataPath && /\/search\/?$/.test(path) && request.method === "GET") {
-        return await handleLookupProxy(env, targetUrl, forwardHeaders, request.headers);
+        try {
+          return await handleLookupProxy(env, targetUrl, forwardHeaders, request.headers);
+        } catch (error) {
+          console.error("Lookup failed outright, answering 3CX as if nobody matched:", error);
+          return lookupFallback(env, requestUrl, request.headers);
+        }
       }
 
       // 4. Intercept Call Journaling (Task creation). Case-insensitive, so
@@ -922,10 +964,19 @@ const requestHandler = {
         return jsonResponse({ error: "Forbidden", message: "This proxy only forwards the requests the 3CX template makes." }, 403);
       }
 
-      return await forwardWithAuthRetry(env, targetUrl, {
+      // The template's own SOQL lookups go through here, and the same rule
+      // applies: a refusal must not reach 3CX, or the call is never journaled.
+      const forwarded = await forwardWithAuthRetry(env, targetUrl, {
         method: "GET",
         headers: forwardHeaders
       });
+      if (forwarded.ok) return forwarded;
+
+      const refusal = await forwarded.text();
+      console.error(`Salesforce refused a template query (${forwarded.status}), answering 3CX with nothing: ${refusal.slice(0, 300)}`);
+      const blocked = blockedFieldFrom(refusal);
+      if (blocked) rememberBlockedField(env, new URL(targetUrl).origin, blocked, refusal);
+      return jsonResponse({ totalSize: 0, done: true, records: [] });
 
     } catch (error) {
       // The detail stays in the logs. Salesforce's own error text is not
@@ -1101,7 +1152,7 @@ async function sfQuery(env, instanceUrl, soql) {
       return null;
     }
     if (blocked && narrowed !== withoutKey) {
-      rememberBlockedField(env, instanceUrl, blocked, errorText);
+      rememberBlockedField(env, instanceUrl, blocked, errorText, soqlObject(query));
     }
     query = narrowed;
     response = await run(query);
@@ -1130,19 +1181,50 @@ function blockedFieldFrom(errorText) {
   return named ? named[1] : "";
 }
 
-function rememberBlockedField(env, instanceUrl, field, errorText) {
-  if (blockedFields.has(field)) return;
-  blockedFields.add(field);
-  queueReport(env, instanceUrl,
-    `${field} cannot be read by the integration user, so it is left out of lookups until the Worker restarts. ` +
-    `Callers are still matched on the fields that remain. Grant the integration user Read on ${field} to restore it. ` +
-    `Salesforce said: ${errorText.slice(0, 200)}`);
+/** The object a "No such column 'X' on entity 'Y'" error is about. */
+function blockedEntityFrom(errorText) {
+  const named = String(errorText).match(/on (?:entity|sobject of type) '?([A-Za-z0-9_]+)'?/i);
+  return named ? named[1] : "";
 }
 
-/** The query with every already-known blocked field taken out. */
+/** The object a query reads, so a field is only set aside for that one. */
+function soqlObject(soql) {
+  const named = String(soql).match(/\bFROM\s+([A-Za-z0-9_]+)/i);
+  return named ? named[1] : "";
+}
+
+/**
+ * Sets a field aside for one object only. Field names repeat across objects —
+ * Description exists on Contact, Lead, Account and Task — and stripping a
+ * field from every query because one object hides it silently breaks the ones
+ * that could read it perfectly well.
+ */
+function rememberBlockedField(env, instanceUrl, field, errorText, fallbackObject = "") {
+  const objectType = blockedEntityFrom(errorText) || fallbackObject;
+  if (!objectType) {
+    console.error(`${field} was refused but Salesforce did not say which object, so it is left in place: ${String(errorText).slice(0, 200)}`);
+    return;
+  }
+
+  const key = `${objectType}.${field}`;
+  if (blockedFields.has(key)) return;
+  blockedFields.add(key);
+  queueReport(env, instanceUrl,
+    `${field} cannot be read on ${objectType} by the integration user, so it is left out of ${objectType} lookups ` +
+    `until the Worker restarts. Callers are still matched on the fields that remain. Grant the integration user ` +
+    `Read on ${objectType}.${field} to restore it. Salesforce said: ${String(errorText).slice(0, 200)}`);
+}
+
+/** The query with every field already known to be blocked on its object taken out. */
 function withoutBlockedFields(soql) {
+  const objectType = soqlObject(soql);
+  if (!objectType) return soql;
+
   let query = soql;
-  for (const field of blockedFields) query = stripFieldFromSoql(query, field);
+  for (const blocked of blockedFields) {
+    const [onObject, field] = blocked.split(".");
+    if (onObject === objectType) query = stripFieldFromSoql(query, field);
+  }
   return query;
 }
 
@@ -1179,8 +1261,10 @@ function stripFieldFromSoql(soql, field) {
  */
 function externalIdUnusable(env, errorText) {
   const field = (env.SALESFORCE_EXTERNAL_ID_FIELD || "").trim();
-  if (!field || !errorText.includes(field)) return false;
-  if (!/INVALID_FIELD|No such column|does not exist|not accessible/i.test(errorText)) return false;
+  // Salesforce quotes the whole query back in its error, and the External ID
+  // is in every identity clause, so "the error mentions it" is not evidence.
+  // Only an error that names it as the bad column counts.
+  if (!field || blockedFieldFrom(errorText) !== field) return false;
   if (!externalIdDisabled) {
     externalIdDisabled = true;
     console.error(`${field} is missing, misspelt or hidden from the integration user. ` +
@@ -1711,6 +1795,30 @@ function extractNameFromTranscription(transcription) {
  * never intercepted, otherwise chats and CFD queries would spawn junk
  * contacts.
  */
+/**
+ * What a lookup answers when it could not be done at all: nothing, or the
+ * stand-in when this is an inbound phone lookup and the gate would have
+ * created a record. Keeping the stand-in matters — it is the difference
+ * between 3CX journaling the call, which the Worker can act on later, and
+ * discarding it with its transcript.
+ */
+function lookupFallback(env, requestUrl, requestHeaders) {
+  try {
+    const query = requestUrl.searchParams.get("q") || "";
+    const phoneMatch = /IN\s+PHONE\s+FIELDS/i.test(query) && query.match(/FIND\s+\{(.*?)\}/i);
+    const phone = phoneMatch ? normalizePhone(phoneMatch[1]).replace(/[^0-9+]/g, "") : "";
+    const outbound = /^outbound$/i.test((requestHeaders.get("X-Call-Direction") || "").trim());
+
+    if (phone && /[0-9]{4,}/.test(phone) && !outbound && !isFilteredNumber(phone, requestHeaders) &&
+        trackedQueuesConfigured(requestHeaders) && trackedQueueList(requestHeaders).length > 0 && creationAllowed(env)) {
+      return pendingCallerMatch(phone);
+    }
+  } catch (e) {
+    console.error("Could not work out a stand-in for the failed lookup:", e.message);
+  }
+  return jsonResponse({ searchRecords: [] }, 200, { "Cache-Control": "no-store" });
+}
+
 async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders) {
   const response = await forwardWithAuthRetry(env, targetUrl, {
     method: "GET",
@@ -1893,7 +2001,17 @@ async function locateRecord(env, instanceUrl, phone, mayCreate, names = null) {
   // Person Accounts take priority in both remaining modes: a converted Lead
   // becomes a Person Account, and that's the record later calls belong on.
   const account = await findPersonAccountByPhone(env, instanceUrl, phone);
-  if (account.record) return { target: personAccountResult(account.record, phone) };
+  if (account.record) {
+    const target = personAccountResult(account.record, phone);
+    // No PersonContactId — usually hidden from the integration user — means
+    // nothing can be linked to it. Treated as a failure so a tracked call is
+    // logged unlinked and someone is told, rather than dropped in silence.
+    if (!target.whoId) {
+      console.error(`Person Account ${account.record.Id} has no readable PersonContactId, so a call cannot be linked to it.`);
+      return failed;
+    }
+    return { target };
+  }
   if (account.failed) return failed;
 
   if (model === "lead") {
@@ -3651,7 +3769,27 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   let enquiryAlert = null;
   let enquiryNotices = [];
   if (gate.active) {
-    const decision = await applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate);
+    // Deciding what a call deserves is worth several Salesforce round trips,
+    // and any of them can throw. None of that is worth the call log: an
+    // unresolved stand-in is dropped from the body and the call is kept
+    // unlinked, the same as when Salesforce simply says no.
+    let decision;
+    try {
+      decision = await applyTrackedQueueGate(env, instanceUrl, taskBody, call, gate);
+    } catch (error) {
+      console.error("The tracked queue decision failed, keeping the call log unlinked:", error);
+      if (isPendingCallerId(taskBody.WhoId)) delete taskBody.WhoId;
+      decision = {
+        reason: `the decision failed (${error.message || error}), logging the call unlinked`,
+        alert: {
+          message: `A call from ${maskPhone(call.phone || "")} through queue ${gate.queue || call.agent} could not be ` +
+            `decided on, because Salesforce could not be reached. Its call log was saved without a record.`,
+          detail: `${callSummary(env, call, gate.queue)}\n\nThe Worker could not finish deciding: ${String(error.message || error).slice(0, 300)}`,
+          guidance: `This call's log is saved in Salesforce but not linked to anyone. Search for the number above, ` +
+            `find or create their record, and link the call log to it.`
+        }
+      };
+    }
     console.log(`Tracked queues (queue ${gate.queue || "none"}, extension ${call.agent}): ${decision.reason}`);
     diag(env, `decision: ${decision.reason}`);
     // Raised once the call log is saved, since they say it was, and so they
@@ -3674,10 +3812,15 @@ async function handleTaskProxy(env, ctx, targetUrl, forwardHeaders, request) {
   let ownerIsFallback = false;
   if (!String(taskBody.OwnerId || "").trim()) {
     delete taskBody.OwnerId;
-    const fallback = await fallbackOwnerId(env, instanceUrl);
-    if (fallback) {
-      taskBody.OwnerId = fallback;
-      ownerIsFallback = true;
+    try {
+      const fallback = await fallbackOwnerId(env, instanceUrl);
+      if (fallback) {
+        taskBody.OwnerId = fallback;
+        ownerIsFallback = true;
+      }
+    } catch (error) {
+      // Who owns the call log is never worth losing it over.
+      console.error("Could not work out the fallback owner, leaving the call log with the integration user:", error.message);
     }
   }
 
