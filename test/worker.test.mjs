@@ -3169,6 +3169,21 @@ await runTest("toggles: diagnostic logs are kept and can be downloaded", async (
   const masterInUrl = await worker.fetch(
     new Request("https://worker.example/logs.txt?key=secret"), keepingEnv, makeCtx());
   check(masterInUrl.status === 401, "the proxy key is not accepted in the query string");
+
+  // A key with a "#" in it never reaches the Worker: the browser keeps
+  // everything after it. The refusal has to say so, since the tab shows
+  // nothing else.
+  const empty = await worker.fetch(new Request("https://worker.example/logs.txt?key="), keepingEnv, makeCtx());
+  const emptyBody = await empty.json();
+  check(empty.status === 401 && emptyBody.message.includes('"#"'), "an empty key explains the # trap");
+
+  const punctuation = await worker.fetch(
+    new Request("https://worker.example/logs.txt?key=ab%26cd"), keepingEnv, makeCtx());
+  check((await punctuation.json()).message.includes("punctuation"), "a key with punctuation says why it failed");
+
+  const unset = await worker.fetch(new Request("https://worker.example/logs.txt?key=whatever"),
+    { ...keepingEnv, DIAGNOSTIC_LOGS: { ...kv, get: async () => null } }, makeCtx());
+  check((await unset.json()).message.includes("make one call"), "and an unlearned key says how to teach it");
 });
 
 // W7: diagnostic logging says what the template sent and what was decided,

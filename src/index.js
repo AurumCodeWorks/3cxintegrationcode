@@ -328,11 +328,28 @@ const DOWNLOAD_KEY_REFRESH_MS = 10 * 60_000;
  * Notes the template's current log download key, at most every ten minutes.
  * Changing it in 3CX therefore takes effect on the next call, not instantly.
  */
+/**
+ * A key that survives being typed into a browser's address bar. Anything from
+ * a "#" onwards is a fragment the browser keeps to itself, so a key with one
+ * in it arrives empty; "%" starts an escape; "&", "+", "?" and spaces all mean
+ * something else in a query string.
+ */
+function browserSafeKey(key) {
+  return /^[A-Za-z0-9._~-]{6,}$/.test(key);
+}
+
 async function rememberDownloadKey(env, headers) {
   const key = (headers && headers.get ? headers.get("X-Log-Download-Key") : "") || "";
   const value = key.trim();
   if (!value || value.startsWith("[") || !env.DIAGNOSTIC_LOGS) return;
   if (Date.now() - downloadKeyWrittenAt < DOWNLOAD_KEY_REFRESH_MS) return;
+
+  if (!browserSafeKey(value)) {
+    console.error("The log download key set in the 3CX template cannot be used in a browser address bar. " +
+      "Use at least six characters, letters, numbers, dashes, dots or underscores only: a \"#\" hides everything " +
+      "after it from the Worker, and \"%\", \"&\", \"+\" and spaces mean other things in a web address. " +
+      "The key still works when sent as the X-Log-Download-Key header.");
+  }
 
   downloadKeyWrittenAt = Date.now();
   try {
@@ -357,13 +374,27 @@ async function handleLogDownload(env, request, requestUrl) {
   if (header && header === env.PROXY_API_KEY) return await downloadDiagnosticLog(env, requestUrl);
 
   const offered = (requestUrl.searchParams.get("key") || "").trim();
-  const stored = offered && env.DIAGNOSTIC_LOGS ? await env.DIAGNOSTIC_LOGS.get(DOWNLOAD_KEY_RECORD) : null;
-  if (stored && offered === stored) return await downloadDiagnosticLog(env, requestUrl);
+  const headerKey = (request.headers.get("X-Log-Download-Key") || "").trim();
+  const stored = env.DIAGNOSTIC_LOGS ? await env.DIAGNOSTIC_LOGS.get(DOWNLOAD_KEY_RECORD) : null;
+  if (stored && (offered === stored || headerKey === stored)) return await downloadDiagnosticLog(env, requestUrl);
 
-  return jsonResponse({
-    error: "Unauthorized",
-    message: "Send the proxy key as the X-Proxy-API-Key header, or the log download key from the 3CX template as ?key="
-  }, 401);
+  // The commonest ways this goes wrong, said plainly, because the person
+  // reading it is looking at a browser tab and nothing else.
+  let why;
+  if (!stored) {
+    why = "No log download key has reached the Worker yet. Set one in the 3CX template, save, then make one call: " +
+      "the Worker learns it from that call.";
+  } else if (!offered) {
+    why = "No key arrived. If yours contains a \"#\", the browser keeps everything after it and the Worker never sees it. " +
+      "Set a key of letters, numbers, dashes, dots or underscores in the 3CX template.";
+  } else if (!browserSafeKey(offered)) {
+    why = "That key contains characters a web address treats as punctuation, so it did not arrive as typed. " +
+      "Use letters, numbers, dashes, dots or underscores.";
+  } else {
+    why = "That key does not match the one in the 3CX template. A key changed there reaches the Worker on the next call.";
+  }
+
+  return jsonResponse({ error: "Unauthorized", message: why }, 401);
 }
 
 async function downloadDiagnosticLog(env, requestUrl) {

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="GB" Name="CloudflareSalesforceProxy" Version="55" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
+<Crm xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Country="GB" Name="CloudflareSalesforceProxy" Version="56" SupportsEmojis="true" SupportsTranscription="true" ListPageSize="0">
   <!-- MaxLength intentionally empty: pass the FULL caller number to the proxy.
        [MaxLength] would truncate to the PBX "match length" setting (e.g. last 7
        digits), which breaks Salesforce lookups and E.164 contact creation. -->
@@ -40,7 +40,7 @@
     <!-- Support -->
     <Parameter Name="Diagnostics" Type="Boolean" Parent="General Configuration" Editor="String" Title="Diagnostic logging - what the Worker was told and what it decided:" Validation="" Default="False" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="LogRetentionDays" Type="String" Parent="General Configuration" Editor="String" Title="Keep diagnostic logs for this many days, to download later (0 keeps none):" Validation="" Default="0" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
-    <Parameter Name="LogDownloadKey" Type="Password" Parent="General Configuration" Editor="String" Title="Log download key - any phrase you choose, lets you open the log in a browser:" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
+    <Parameter Name="LogDownloadKey" Type="Password" Parent="General Configuration" Editor="String" Title="Log download key - letters, numbers, dashes only, at least 6 (no # % ^ or spaces, a browser drops them):" Validation="" Default="" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
     <Parameter Name="LogDownloadLink" Type="String" Parent="General Configuration" Editor="String" Title="Log download link - copy into a browser and add your key (for reference, editing it does nothing):" Validation="" Default="https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev/logs.txt?key=" ListValues="" RequestUrl="" RequestUrlParameters="" ResponseScenario="" />
 
     <!-- Call journaling -->
