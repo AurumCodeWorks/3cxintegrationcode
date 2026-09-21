@@ -3184,6 +3184,19 @@ await runTest("toggles: diagnostic logs are kept and can be downloaded", async (
   const unset = await worker.fetch(new Request("https://worker.example/logs.txt?key=whatever"),
     { ...keepingEnv, DIAGNOSTIC_LOGS: { ...kv, get: async () => null } }, makeCtx());
   check((await unset.json()).message.includes("make one call"), "and an unlearned key says how to teach it");
+
+  // The download page: no key in the address, so it is safe to bookmark, and
+  // it sends the key as a header instead.
+  const page = await worker.fetch(new Request("https://worker.example/logs"), keepingEnv, makeCtx());
+  const html = await page.text();
+  check(page.status === 200 && (page.headers.get("Content-Type") || "").includes("text/html"), "the page is served without a key");
+  check(!html.includes("secret") && !html.includes("open sesame"), "and carries no key or other secret itself");
+  check(html.includes("X-Log-Download-Key") && html.includes("/logs.txt"), "it sends the key as a header");
+  check(!/https?:\/\/(?!worker\.example)/.test(html.replace(/https?:\/\/www\.w3\.org[^"']*/g, "")), "nothing is loaded from anywhere else");
+
+  const withHeader = await worker.fetch(new Request("https://worker.example/logs.txt",
+    { headers: { "X-Log-Download-Key": "open sesame" } }), keepingEnv, makeCtx());
+  check(withHeader.status === 200, "and the header the page sends is accepted");
 });
 
 // W7: diagnostic logging says what the template sent and what was decided,

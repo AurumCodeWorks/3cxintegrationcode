@@ -3,7 +3,7 @@
 A Cloudflare Worker that sits between a 3CX phone system and Salesforce so that **calls from numbers that aren't in the CRM still get logged**, with their AI transcription, against a real Salesforce record — without creating duplicates.
 
 - **Worker:** `3cx-salesforce-proxy-cedarcare` -> https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev
-- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v56)
+- **3CX template:** [cloudflare_salesforce_integration.xml](cloudflare_salesforce_integration.xml) (v57)
 - **Salesforce API:** v55.0, OAuth 2.0 client-credentials flow
 
 ---
@@ -382,13 +382,11 @@ Invoke-WebRequest -Uri "https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5
 
 Newest first, `?entries=500` for more (500 is the cap).
 
-**Or from a browser.** Set a **Log download key** in the template (any phrase), then open the **Log download link** shown beneath it with your key on the end:
+**Or from a browser, in one click.** Set a **Log download key** in the template (letters, numbers and dashes, at least six), then open the **Log download page** shown beneath it:
 
-```
-https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev/logs.txt?key=your-phrase
-```
 
-That key only reads the log, and changing it in 3CX revokes the old one, so it is a fair thing to put in a URL. The **proxy key is not accepted there** — it writes to Salesforce, and a URL ends up in history, bookmarks and somebody's screenshot. A key changed in 3CX takes effect on the next call, since that is when the Worker learns it.
+
+Enter the key once, tick *Remember on this device*, and every visit afterwards downloads the file on its own. Bookmark it: the address holds no secret, because the key is sent as a header and kept in that browser alone. Pasting the key into the address instead works too (), but a key with a  in it never arrives, since a browser keeps everything after a  to itself. The **proxy key is refused in a web address** either way: that one writes to Salesforce. A key changed in 3CX takes effect on the next call, since that is when the Worker learns it.
 
 Each entry holds what the template sent, what the call was, what was decided and anything that failed. Numbers are masked and nothing said on a call is stored, so it is safe to hand the file to someone. Every kept call costs one write to Cloudflare KV, so leave the setting at 0 unless you are chasing something.
 
@@ -455,7 +453,7 @@ Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce it
 ## Development
 
 ```bash
-npm test                       # 539 checks — no network, no credentials needed
+npm test                       # 544 checks — no network, no credentials needed
 npx wrangler deploy --dry-run --outdir dist   # validate the bundle
 npx wrangler deploy                # ship it
 npx wrangler tail                  # live logs, including filter decisions

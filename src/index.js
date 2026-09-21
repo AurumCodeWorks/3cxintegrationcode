@@ -317,6 +317,78 @@ async function storeDiagnosticLog(env) {
  * proxy key as everything else, so it is fetched with a command rather than
  * a browser link: a key in a URL ends up in history, bookmarks and logs.
  */
+/**
+ * The download page. Deliberately plain and self-contained: no libraries, no
+ * external anything, and nothing secret in the page or its address. The key
+ * is typed once, kept in this browser only, and sent as a header, which is
+ * what keeps it out of history, bookmarks and screenshots.
+ */
+const LOG_DOWNLOAD_PAGE = `<!doctype html>
+<html lang="en-GB"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3CX integration log</title>
+<style>
+ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #14161a; color: #e8eaed;
+        display: grid; place-items: center; min-height: 100vh; }
+ main { width: min(30rem, 92vw); background: #1d2025; border: 1px solid #2c3037; border-radius: 10px; padding: 1.75rem; }
+ h1 { font-size: 1.1rem; margin: 0 0 .35rem; }
+ p { color: #a8adb6; margin: 0 0 1.25rem; }
+ label { display: block; font-size: .85rem; color: #a8adb6; margin-bottom: .35rem; }
+ input[type=password] { width: 100%; box-sizing: border-box; padding: .6rem .7rem; border-radius: 6px;
+        border: 1px solid #383d46; background: #14161a; color: #e8eaed; font-size: 1rem; }
+ .row { display: flex; align-items: center; gap: .5rem; margin: .9rem 0 1.25rem; font-size: .85rem; color: #a8adb6; }
+ button { width: 100%; padding: .7rem; border: 0; border-radius: 6px; background: #2f6fed; color: #fff;
+        font-size: 1rem; cursor: pointer; }
+ button:hover { background: #245ed1; }
+ #said { margin-top: 1rem; font-size: .85rem; min-height: 1.2rem; }
+ .bad { color: #ff8a8a; } .good { color: #8ad49a; }
+</style></head>
+<body><main>
+ <h1>3CX to Salesforce integration log</h1>
+ <p>Diagnostic entries, newest first. Set the key in the 3CX template under Integrations, CRM.</p>
+ <label for="key">Log download key</label>
+ <input id="key" type="password" autocomplete="current-password" spellcheck="false">
+ <div class="row"><input id="remember" type="checkbox" checked><label for="remember" style="margin:0">Remember on this device</label></div>
+ <button id="go">Download the log</button>
+ <div id="said"></div>
+</main>
+<script>
+ const key = document.getElementById("key"), remember = document.getElementById("remember"),
+       go = document.getElementById("go"), said = document.getElementById("said");
+ const saved = localStorage.getItem("logKey");
+ if (saved) { key.value = saved; }
+
+ async function download() {
+   if (!key.value.trim()) { said.className = "bad"; said.textContent = "Enter the key from the 3CX template."; return; }
+   said.className = ""; said.textContent = "Fetching…"; go.disabled = true;
+   try {
+     const response = await fetch("/logs.txt?entries=500", { headers: { "X-Log-Download-Key": key.value.trim() } });
+     if (!response.ok) {
+       const body = await response.json().catch(() => ({}));
+       said.className = "bad";
+       said.textContent = body.message || ("Refused (" + response.status + ").");
+       return;
+     }
+     const blob = await response.blob();
+     const link = document.createElement("a");
+     link.href = URL.createObjectURL(blob);
+     link.download = "3cx-worker-log.txt";
+     link.click();
+     URL.revokeObjectURL(link.href);
+     if (remember.checked) { localStorage.setItem("logKey", key.value.trim()); } else { localStorage.removeItem("logKey"); }
+     said.className = "good"; said.textContent = "Downloaded.";
+   } catch (e) {
+     said.className = "bad"; said.textContent = "Could not reach the Worker: " + e.message;
+   } finally {
+     go.disabled = false;
+   }
+ }
+
+ go.addEventListener("click", download);
+ key.addEventListener("keydown", e => { if (e.key === "Enter") download(); });
+ // Already trusted on this device: one click was the point.
+ if (saved) { download(); }
+</script></body></html>`;
+
 // Where the template's log download key is kept, so a browser request can be
 // checked against it. The Worker is stateless, and only learns the key when
 // 3CX sends it on a call.
@@ -713,6 +785,15 @@ const requestHandler = {
         return Response.redirect(`${trimmedLoginUrl(env)}/lightning/o/${home}/home`, 302);
       }
       return Response.redirect(`${trimmedLoginUrl(env)}/${salesforceId}`, 302);
+    }
+
+    // A page with a download button, so the key never has to travel in a web
+    // address. It holds nothing secret itself, which is what makes it safe to
+    // bookmark and to leave on a screen.
+    if (path === "/logs" && request.method === "GET") {
+      return new Response(LOG_DOWNLOAD_PAGE, {
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+      });
     }
 
     // The stored diagnostic log, as a text file. Checked before the proxy key,
