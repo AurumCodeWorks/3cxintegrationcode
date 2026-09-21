@@ -384,9 +384,13 @@ Newest first, `?entries=500` for more (500 is the cap).
 
 **Or from a browser, in one click.** Set a **Log download key** in the template (letters, numbers and dashes, at least six), then open the **Log download page** shown beneath it:
 
+```
+https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev/logs
+```
 
+Enter the key once, tick *Remember on this device*, and every visit afterwards downloads the file on its own. Bookmark it: the address holds no secret, because the key is sent as a header and kept in that browser alone.
 
-Enter the key once, tick *Remember on this device*, and every visit afterwards downloads the file on its own. Bookmark it: the address holds no secret, because the key is sent as a header and kept in that browser alone. Pasting the key into the address instead works too (), but a key with a  in it never arrives, since a browser keeps everything after a  to itself. The **proxy key is refused in a web address** either way: that one writes to Salesforce. A key changed in 3CX takes effect on the next call, since that is when the Worker learns it.
+Pasting the key into the address works too, as `?key=your-phrase`, but a key containing `#` never arrives — a browser keeps everything after a `#` to itself — and `%`, `&`, `+` and spaces mean other things in an address. The **proxy key is refused in an address** either way: that one writes to Salesforce. A key changed in 3CX takes effect on the next call, since that is when the Worker learns it.
 
 Each entry holds what the template sent, what the call was, what was decided and anything that failed. Numbers are masked and nothing said on a call is stored, so it is safe to hand the file to someone. Every kept call costs one write to Cloudflare KV, so leave the setting at 0 unless you are chasing something.
 
