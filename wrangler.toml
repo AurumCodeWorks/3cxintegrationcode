@@ -77,4 +77,8 @@ SALESFORCE_HOME_FIELD = "Care_Home__c"
 # so calls are not paying for the extra queries.
 # The PBX whose departments name the homes. Its API client id and secret are
 # the THREECX_CLIENT_ID and THREECX_CLIENT_SECRET secrets.
+# Set SALESFORCE_RECORD_CHECK to a record id and deploy to have the Worker
+# read it back once and log its owner, fields and tasks.
+# The PBX whose departments name the homes. Its API client id and secret are
+# the THREECX_CLIENT_ID and THREECX_CLIENT_SECRET secrets.
 THREECX_URL = "https://cedarcare.my3cx.uk"

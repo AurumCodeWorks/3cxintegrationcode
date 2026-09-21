@@ -245,6 +245,7 @@ function diagnosticsOn(env) {
 // Runs once per Worker instance while SALESFORCE_FIELD_CHECK is set, so the
 // answer lands in the log without anyone handling a credential.
 let fieldCheckDone = false;
+let recordCheckDone = false;
 
 /**
  * Asks Salesforce, as the integration user itself, which fields it can
@@ -297,6 +298,49 @@ async function runFieldCheck(env, instanceUrl) {
 
   console.log(`Field check, as the integration user:\n  READABLE: ${readable.join(", ") || "none"}\n  ` +
     `BLOCKED OR MISSING: ${blocked.join(", ") || "none"}`);
+}
+
+/**
+ * Reads one record back and says what became of it: who owns it after the
+ * org's assignment rules ran, what it is called, and whether the fields the
+ * integration sets actually landed. Set SALESFORCE_RECORD_CHECK to a record
+ * id and deploy; it runs once per Worker instance.
+ */
+async function runRecordCheck(env, instanceUrl, recordId) {
+  const objectType = recordId.startsWith(PREFIX_LEAD) ? "Lead" : recordId.startsWith(PREFIX_CONTACT) ? "Contact" : "Account";
+  const fields = objectType === "Lead"
+    ? `Id, FirstName, LastName, Company, Status, LeadSource, ${(env.SALESFORCE_HOME_FIELD || "").trim() || "Id"}, ` +
+      `${externalIdField(env) || "Id"}, Owner.Name, Owner.Type, CreatedDate, CreatedBy.Name, Description`
+    : `Id, FirstName, LastName, Owner.Name, CreatedDate, Description`;
+
+  const response = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/query/?` +
+    new URLSearchParams({ q: `SELECT ${fields} FROM ${objectType} WHERE Id = '${recordId}'` }));
+  if (!response.ok) {
+    console.log(`Record check: ${objectType} ${recordId} could not be read (${response.status}): ${(await response.text()).slice(0, 200)}`);
+    return;
+  }
+
+  const record = ((await response.json()).records || [])[0];
+  if (!record) {
+    console.log(`Record check: ${objectType} ${recordId} does not exist, or this user cannot see it.`);
+    return;
+  }
+
+  const owner = record.Owner || {};
+  const description = String(record.Description || "");
+  console.log(`Record check: ${objectType} ${recordId}\n` +
+    `  name: ${record.FirstName || ""} ${record.LastName || ""}\n` +
+    `  owner: ${owner.Name || "unknown"}${owner.Type ? ` (${owner.Type})` : ""}, created by ${(record.CreatedBy || {}).Name || "unknown"} at ${record.CreatedDate}\n` +
+    `  care home: ${record[(env.SALESFORCE_HOME_FIELD || "").trim()] || "(not set)"}, lead source: ${record.LeadSource || "(not set)"}, ` +
+    `key: ${record[externalIdField(env)] || "(not set)"}\n` +
+    `  description: ${description.length} characters, call history ${description.includes(HISTORY_START) ? "present" : "MISSING"}`);
+
+  const tasks = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/query/?` +
+    new URLSearchParams({ q: `SELECT Subject, Status, Owner.Name FROM Task WHERE WhoId = '${recordId}' ORDER BY CreatedDate DESC LIMIT 5` }));
+  if (tasks.ok) {
+    const list = ((await tasks.json()).records || []).map(t => `"${t.Subject}" (${t.Status}, ${(t.Owner || {}).Name || "?"})`);
+    console.log(`  tasks on it: ${list.join("; ") || "none"}`);
+  }
 }
 
 /** True when the template has switched the "Action Required" reminders off. */
@@ -920,6 +964,14 @@ const requestHandler = {
         fieldCheckDone = true;
         if (ctx && typeof ctx.waitUntil === "function") {
           ctx.waitUntil(runFieldCheck(env, instanceUrl).catch(e => console.error("Field check failed:", e.message)));
+        }
+      }
+
+      const checking = String(env.SALESFORCE_RECORD_CHECK || "").trim();
+      if (!recordCheckDone && /^[A-Za-z0-9]{15,18}$/.test(checking)) {
+        recordCheckDone = true;
+        if (ctx && typeof ctx.waitUntil === "function") {
+          ctx.waitUntil(runRecordCheck(env, instanceUrl, checking).catch(e => console.error("Record check failed:", e.message)));
         }
       }
 
