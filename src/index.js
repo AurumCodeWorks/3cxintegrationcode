@@ -261,6 +261,23 @@ async function runFieldCheck(env, instanceUrl) {
     Task: ["Description", "WhoId", "OwnerId", "CallDurationInSeconds", "CreatedById"]
   };
 
+  // Who the Worker is actually running as. Field access follows this user,
+  // so a permission set assigned to anyone else changes nothing here.
+  if (cachedUserId) {
+    const who = await sfFetch(env, `${instanceUrl}${SF_API_PATH}/query/?` + new URLSearchParams({
+      q: `SELECT Id, Name, Username, UserType, IsActive, Profile.Name FROM User WHERE Id = '${cachedUserId}'`
+    }));
+    if (who.ok) {
+      const user = ((await who.json()).records || [])[0];
+      console.log(user
+        ? `Running as: ${user.Name} (${user.Username}), profile "${(user.Profile || {}).Name}", type ${user.UserType}, active ${user.IsActive}. ` +
+          `Assign the integration permission set to THIS user.`
+        : `Running as user ${cachedUserId}, which this user cannot read back.`);
+    } else {
+      console.log(`Running as user ${cachedUserId}; reading its details was refused (${who.status}).`);
+    }
+  }
+
   const blocked = [];
   const readable = [];
   for (const [objectType, fields] of Object.entries(wanted)) {
