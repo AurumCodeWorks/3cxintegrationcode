@@ -45,10 +45,15 @@ head_sampling_rate = 1
 binding = "DIAGNOSTIC_LOGS"
 id = "9977453e82054829bcb2aa71c2784422"
 
-# Moving to Cedar Care's PRODUCTION org is a config change, not a deployment:
-# set SALESFORCE_LOGIN_URL below to https://cedarcarehomes.my.salesforce.com
-# (the My Domain URL: login.salesforce.com is refused) and re-set the two
-# External Client App secrets.
+# Pointed at Cedar Care's PRODUCTION org (My Domain URL; login.salesforce.com
+# is refused). To go back to UAT, set SALESFORCE_LOGIN_URL below to
+# https://cedarcarehomes--uat.sandbox.my.salesforce.com and re-set the two
+# External Client App secrets to the UAT ones. Either direction, the URL and
+# the credentials must move together: a production URL with UAT credentials
+# fails every token request, and while a lookup then degrades to "nobody
+# matched", journaling fails outright, so every call in that window is lost.
+# Do the swap out of hours, when the PBX sends calls to the answering service
+# and the Worker sees none of them.
 # Each "secret put" goes live on its own, so set both in one go to avoid a
 # window where the URL and credentials belong to different orgs:
 #   npx wrangler secret bulk secrets.json   (then delete secrets.json)
@@ -60,7 +65,7 @@ id = "9977453e82054829bcb2aa71c2784422"
 # These define which org this Worker talks to, so they live in code where they
 # are reviewable. Editing them in the dashboard is reverted by the next deploy.
 [vars]
-SALESFORCE_LOGIN_URL = "https://cedarcarehomes--uat.sandbox.my.salesforce.com"
+SALESFORCE_LOGIN_URL = "https://cedarcarehomes.my.salesforce.com"
 # Lead-first: an unknown caller answered through a tracked queue becomes a
 # Lead, and once someone converts it, later calls match the Person Account.
 SALESFORCE_ORG_MODEL = "lead"

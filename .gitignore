@@ -5,6 +5,7 @@ dist/
 # Wrangler's local secret store — never commit Salesforce credentials
 .dev.vars
 .env
+secrets.json
 
 *.log
 *.bak
