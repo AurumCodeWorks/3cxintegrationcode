@@ -476,7 +476,7 @@ Auto attendants and queue legs are menu prompts and hold music. There is nothing
 Oakhill menu 2017 (4:35), then ext 0375 (1:10)
 ```
 
-List the receptionist and ring group extensions under **Receptionist Extensions** in the CRM template so they are treated as routing rather than as callers. Tracked queues count automatically.
+List the receptionist and ring group extensions in the CRM template, under *Digital receptionists and ring groups, which route rather than answer*, so they are treated as routing rather than as callers. Tracked queues count automatically.
 
 ### Verifying, one level at a time
 
@@ -506,7 +506,7 @@ Care home call recordings are very likely **special category health data** under
 | Storage and quota | See the warning above |
 | Announcement to callers | "This call may be recorded" is normally expected, and often required |
 
-The integration can log a call while withholding everything said on it — see **Confidential Extensions** in [README.md](README.md) — so recording for operational purposes and keeping content out of the CRM are separate decisions.
+The integration can log a call while withholding everything said on it — the CRM template setting *Log the call but never its content, for these extensions*, described in [README.md](README.md) — so recording for operational purposes and keeping content out of the CRM are separate decisions.
 
 In Salesforce, what was said lives only on the call log Task, never copied onto the Lead or Account (see **Retention** in [README.md](README.md)). The name heard on a call is on the reminder Task (`Action Required: …`), which is not a call Task. Cedar Care's weekly job deletes calls and transcripts after 7 years. **Still to confirm with them:** that it also covers `Action Required:` reminders and `3CX Integration Error:` alerts, or those outlive the call logs they came from.
 

@@ -4,7 +4,9 @@ Everything the run-as user needs, so the integration can be stood up in a new or
 
 Build this as a **permission set** rather than by editing a profile. It only affects who you assign it to, and it is one artefact to redeploy to production rather than a list of checkboxes to remember.
 
-> **Why this matters more than it looks.** Salesforce reports a field hidden by field-level security as `No such column 'X' on entity 'Y'`, identical to a field that does not exist. The Worker treats a failed query as "Salesforce is unreachable" and creates nothing, so a single hidden field silently disables the whole integration. Calls stop logging and nothing obvious explains why.
+> **Why this matters more than it looks.** Salesforce reports a field hidden by field-level security as `No such column 'X' on entity 'Y'`, identical to a field that does not exist. That one refusal used to fail the whole query, and with it the whole integration — which is what the [16 September outage](#the-16-september-2026-outage-permissions-do-not-follow-a-run-as-change) was.
+>
+> Since then the Worker degrades instead: it drops the refused field, retries without it, and says so in the log. So a missing permission no longer stops calls being logged — it quietly costs you whatever that field did. A caller reachable only on a home number stops matching; a care home that cannot be written stops reaching the assignment rule. Nothing looks broken, which is why the check under [Verifying](#verifying) is worth running rather than assuming.
 
 ---
 

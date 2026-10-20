@@ -37,7 +37,10 @@ globalThis.fetch = async (url, init = {}) => {
 const SF = "https://sf.example.com";
 const tokenRoute = {
   match: r => r.url.includes("/services/oauth2/token"),
-  reply: { access_token: "tok", instance_url: SF }
+  // The identity URL is what tells the Worker which user it is running as,
+  // and every "only the tasks we created" guard depends on it. Without one
+  // here, those guards were absent from every test.
+  reply: { access_token: "tok", instance_url: SF, id: `${SF}/id/00D000000000001EAA/005WORKER000001AAA` }
 };
 const patch204 = { match: r => r.method === "PATCH", reply: { status: 204 } };
 const delete204 = { match: r => r.method === "DELETE", reply: { status: 204 } };
@@ -2478,6 +2481,112 @@ await runTest("aligned: care home stamped on the Lead at creation", async () => 
   check(forwardedCallTask()?.WhoId === "00QHOME000000001AA", "call linked to the new Lead");
 });
 
+// A1b: Cedar Care's field mapping request of 21 September 2026, exactly as
+// asked: three constants on every enquiry Lead, and three department names
+// translated into the picklist's own wording. Both are configuration, so this
+// is here to prove the Worker needs no change to satisfy the request.
+await runTest("Cedar Care: the requested fields and home names land on the Lead", async () => {
+  const asRequested = {
+    ...homeEnv,
+    SALESFORCE_HOME_FIELD: "Care_Home__c",
+    SALESFORCE_EXTRA_FIELDS: JSON.stringify({
+      Lead: { Enquiry_Type__c: "Care Home Enquiry", LeadSource: "Other", Enquiry_Channel__c: "Phone" }
+    }),
+    // Keyed on the 3CX department, which is what the Worker stamps.
+    SALESFORCE_HOME_VALUES: JSON.stringify({
+      Larkhall: "Larkhall Springs", Dearbourne: "Dearbourne Manor",
+      Oakhill: "Oakhill Mansions", "Arbour Walk": "Arbour Walk Lodge"
+    })
+  };
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), asRequested, ctx);
+  await Promise.all(ctx.tasks);
+
+  const lead = leadPosts()[0]?.body || {};
+  check(lead.Enquiry_Type__c === "Care Home Enquiry", `Enquiry Type set (got "${lead.Enquiry_Type__c}")`);
+  check(lead.LeadSource === "Other", `Lead Source set (got "${lead.LeadSource}")`);
+  check(lead.Enquiry_Channel__c === "Phone", `Enquiry Channel set (got "${lead.Enquiry_Channel__c}")`);
+  check(lead.Care_Home__c === "Arbour Walk Lodge", `the department is mapped to the picklist value (got "${lead.Care_Home__c}")`);
+});
+
+// A1c: and when the org refuses one of them, the enquiry still becomes a Lead
+// with everything else on it. This is what a blank care home looks like from
+// the outside, so it is worth pinning.
+await runTest("Cedar Care: a refused value costs that field, never the Lead", async () => {
+  const asRequested = {
+    ...homeEnv,
+    SALESFORCE_HOME_FIELD: "Care_Home__c",
+    SALESFORCE_EXTRA_FIELDS: JSON.stringify({ Lead: { Enquiry_Type__c: "Not In The Picklist", LeadSource: "Other" } })
+  };
+  routes = enquiryRoutes((r, hits) => hits === 1
+    ? { status: 400, json: [{ message: "bad value for restricted picklist field: Not In The Picklist",
+        errorCode: "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST", fields: ["Enquiry_Type__c"] }] }
+    : created201);
+  const ctx = makeCtx();
+  await worker.fetch(enquiryCall(), asRequested, ctx);
+  await Promise.all(ctx.tasks);
+
+  const retry = leadPosts()[1]?.body || {};
+  check(leadPosts().length === 2, `the insert is retried without the refused field (${leadPosts().length} attempts)`);
+  check(!("Enquiry_Type__c" in retry), "the refused field is dropped");
+  check(retry.LeadSource === "Other", "the other requested fields still land");
+  check(retry.Care_Home__c === "Arbour Walk", "and so does the care home");
+  check(forwardedCallTask()?.WhoId === "00QHOME000000001AA", "the call is logged against the Lead either way");
+});
+
+// A1d: the built-in field check has to cover the fields the org was told to
+// stamp, or it answers for everything except the ones just configured.
+await runTest("Cedar Care: the field check covers configured extra fields", async () => {
+  const fresh = (await import(new URL("../src/index.js?fieldcheck", import.meta.url))).default;
+  routes = [tokenRoute, { match: r => r.method === "GET" && r.url.includes("/query/"), reply: { records: [] } }];
+  const checking = {
+    ...env,
+    SALESFORCE_FIELD_CHECK: "true",
+    SALESFORCE_HOME_FIELD: "Care_Home__c",
+    SALESFORCE_EXTRA_FIELDS: JSON.stringify({
+      Lead: { Enquiry_Type__c: "Care Home Enquiry", LeadSource: "Other", Enquiry_Channel__c: "Phone" }
+    })
+  };
+  const ctx = makeCtx();
+  await fresh.fetch(new Request(
+    `https://worker.example/services/data/v55.0/query/?q=${encodeURIComponent("SELECT Id FROM Lead WHERE Name LIKE '%zzz%' LIMIT 10")}`,
+    { headers: { "X-Proxy-API-Key": "secret" } }), checking, ctx);
+  await Promise.all(ctx.tasks);
+
+  const asked = field => calls.some(c => urlHas(c, `SELECT ${field} FROM Lead`));
+  check(asked("Enquiry_Type__c"), "Enquiry_Type__c is asked about");
+  check(asked("Enquiry_Channel__c"), "Enquiry_Channel__c is asked about");
+  check(asked("Care_Home__c"), "and the care home field still is");
+  check(calls.filter(c => urlHas(c, "SELECT LeadSource FROM Lead")).length === 1,
+    "a field named twice is only asked about once");
+});
+
+// A1e: head office placements can quote for any home, so the enquiry belongs
+// to none of them yet. Mapping that department to nothing leaves the field for
+// a person, while the record still says where the call came in.
+await runTest("Cedar Care: a department mapped to nothing leaves the home unset", async () => {
+  // A queue number no earlier test has put in the 3CX directory, which takes
+  // precedence over EXTENSION_DEPARTMENTS.
+  const central = {
+    ...homeEnv,
+    SALESFORCE_HOME_FIELD: "Care_Home__c",
+    EXTENSION_DEPARTMENTS: '{"8131":"Head Office"}',
+    SALESFORCE_HOME_VALUES: JSON.stringify({ "Head Office": "", Larkhall: "Larkhall Springs" })
+  };
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn),
+    { "X-Tracked-Queues": "8131", "X-Queue-Extension": "8131" }), central, ctx);
+  await Promise.all(ctx.tasks);
+
+  const lead = leadPosts()[0]?.body || {};
+  check(!("Care_Home__c" in lead), `no care home is sent at all (got "${lead.Care_Home__c}")`);
+  check(lead.FirstName === "Head Office", `the record still names the route (got "${lead.FirstName}")`);
+  check(/through Head Office \(queue 8131\)/.test(lead.Description || ""),
+    `and the description records where it came in (got "${(lead.Description || "").split("\n")[0]}")`);
+});
+
 // A2: a duplicate rule set to Allow does not refuse the insert; only record inserts say so
 await runTest("aligned: record inserts allow saves past Allow duplicate rules", async () => {
   routes = enquiryRoutes(created201);
@@ -3466,6 +3575,173 @@ await runTest("review: blocked fields are remembered per object", async () => {
     "Description blocked on Contact is still read on Task, where the merge needs it");
 });
 
+// ── Gaps the review found in this suite ─────────────────────────────────
+
+// R1: a trailing slash on the Worker URL in 3CX produces "//services/..."
+await runTest("review: a doubled slash in the path behaves as one", async () => {
+  routes = [tokenRoute, { match: sfSearch, reply: { searchRecords: [] } }, { match: byPhone, reply: { records: [] } }];
+  const res = await worker.fetch(new Request(
+    `https://worker.example//services/data/v55.0/search/?q=${encodeURIComponent("FIND {07911123456} IN PHONE FIELDS RETURNING Contact(Id)")}`,
+    { headers: { "X-Proxy-API-Key": "secret", ...tracked() } }), env, makeCtx());
+  check(res.status === 200, `answered normally (got ${res.status})`);
+  check((await res.json()).searchRecords?.[0]?.Id === standIn, "and the stand-in is returned as usual");
+
+  routes = [tokenRoute, noRecentCall, { match: taskPost, reply: { json: { id: "00TSLASH00000001A" }, status: 201 } },
+    { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+    { match: byTask, reply: { records: [] } }, { match: openIntegrationAlert, reply: { records: [] } }, patch204, delete204];
+  const ctx = makeCtx();
+  const log = await worker.fetch(new Request("https://worker.example//services/data/v55.0/sobjects/task", {
+    method: "POST", headers: { "X-Proxy-API-Key": "secret", "Content-Type": "application/json" },
+    body: JSON.stringify(callTaskBody("003RING00000001AAA"))
+  }), env, ctx);
+  await Promise.all(ctx.tasks);
+  check(log.status === 201 && !!forwardedCallTask(), "and a call log on the doubled path is still journaled");
+});
+
+// R2: the merge only ever touches call logs this integration created
+await runTest("review: the merge is limited to the Worker's own call logs", async () => {
+  routes = maintenanceRoutes();
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA")), env, ctx);
+  await Promise.all(ctx.tasks);
+  const merge = calls.find(recentCallQuery);
+  check(!!merge && urlHas(merge, "CreatedById = '005WORKER000001AAA'"),
+    "the recent call query is scoped to the run-as user from the token");
+});
+
+// R3: the internal-extension cutoff is a setting, not a constant
+await runTest("review: Internal Extension Max Digits is honoured", async () => {
+  routes = [tokenRoute, { match: sfSearch, reply: { searchRecords: [] } }, { match: byPhone, reply: { records: [] } }];
+  const short = await worker.fetch(
+    lookupRequest("FIND {1234567} IN PHONE FIELDS RETURNING Contact(Id)",
+      tracked({ "X-Internal-Max-Digits": "7" })), env, makeCtx());
+  check((await short.json()).searchRecords.length === 0, "7 digits is internal when the setting says so");
+  check(contactPosts().length === 0, "and nothing is created for it");
+
+  calls = [];
+  routes = [tokenRoute, { match: sfSearch, reply: { searchRecords: [] } }, { match: byPhone, reply: { records: [] } }];
+  const normal = await worker.fetch(
+    lookupRequest("FIND {1234567} IN PHONE FIELDS RETURNING Contact(Id)",
+      tracked({ "X-Internal-Max-Digits": "6" })), env, makeCtx());
+  check((await normal.json()).searchRecords?.[0]?.Id?.startsWith("PENDING_CALLER_"), "the same number is external at 6");
+});
+
+// R4: the per-direction switches
+await runTest("review: inbound and missed journaling can be switched off", async () => {
+  for (const [header, description, what] of [
+    ["X-Journal-Inbound", inboundDescription, "an answered inbound call"],
+    ["X-Journal-Missed", "17/07/2026 15:00: Missed call from 447911123456 to 102", "a missed call"]
+  ]) {
+    calls = [];
+    routes = [tokenRoute];
+    const res = await worker.fetch(taskRequest(callTaskBody("003RING00000001AAA", description), { [header]: "False" }), env, makeCtx());
+    const body = await res.json();
+    check(res.status === 201 && body.filtered === "direction", `${what} is dropped when ${header} is False`);
+    check(!calls.some(taskPost), `and nothing about ${what} reaches Salesforce`);
+  }
+});
+
+// R5: the log's keys really do sort newest first
+await runTest("review: stored log entries sort newest first", async () => {
+  const store = new Map();
+  const kv = {
+    put: async (k, v, o) => { store.set(k, { value: v, options: o }); },
+    get: async (k) => (store.get(k) || {}).value,
+    delete: async (k) => { store.delete(k); },
+    list: async ({ prefix, limit }) => ({ keys: [...store.keys()].filter(k => k.startsWith(prefix)).sort().slice(0, limit).map(name => ({ name })), list_complete: true })
+  };
+  const keepingEnv = { ...plainEnv, DIAGNOSTIC_LOGS: kv };
+  for (const queue of ["800", "801"]) {
+    routes = enquiryRoutes(created201);
+    const ctx = makeCtx();
+    await worker.fetch(taskRequest(callTaskBody(standIn),
+      tracked({ "X-Queue-Extension": queue, "X-Tracked-Queues": "800,801", "X-Log-Retention-Days": "7" })), keepingEnv, ctx);
+    await Promise.all(ctx.tasks);
+  }
+  const keys = [...store.keys()].filter(k => k.startsWith("log:")).sort();
+  check(keys.length === 2, `two entries stored (got ${keys.length})`);
+  check((store.get(keys[0]).value || "").includes("queue 801"), "the later call sorts first, so a download reads newest first");
+});
+
+// R6: a caller who could not be looked up is not remembered as "no such caller"
+await runTest("review: creating a record clears the type-ahead cache", async () => {
+  const term = "990099";
+  const typeAhead = q => new Request(`https://worker.example/services/data/v55.0/query/?q=${encodeURIComponent(q)}`,
+    { headers: { "X-Proxy-API-Key": "secret" } });
+  const query = `SELECT Id, Name FROM Account WHERE Name LIKE '%${term}%' LIMIT 10`;
+
+  routes = [tokenRoute, { match: r => r.method === "GET" && r.url.includes("/query/"), reply: { records: [] } }];
+  await worker.fetch(typeAhead(query), env, makeCtx());
+  calls = [];
+  await worker.fetch(typeAhead(query), env, makeCtx());
+  check(!calls.some(r => r.url.includes("/query/")), "a term already known empty is answered locally");
+
+  // Creating a record makes that answer wrong, so the cache is dropped.
+  routes = enquiryRoutes(created201);
+  const ctx = makeCtx();
+  await worker.fetch(taskRequest(callTaskBody(standIn), toggles()), homeEnv, ctx);
+  await Promise.all(ctx.tasks);
+
+  calls = [];
+  routes = [tokenRoute, { match: r => r.method === "GET" && r.url.includes("/query/"), reply: { records: [] } }];
+  await worker.fetch(typeAhead(query), env, makeCtx());
+  check(calls.some(r => r.url.includes("/query/")), "after a record is created the same term asks Salesforce again");
+});
+
+// R8: Salesforce refusing to issue a token
+await runTest("review: a token outage does not stop 3CX journaling the call", async () => {
+  const fresh = (await import(new URL("../src/index.js?token", import.meta.url))).default;
+  const refusedToken = {
+    match: r => r.url.includes("/services/oauth2/token"),
+    reply: { json: { error: "invalid_client_id", error_description: "client identifier invalid CLIENTSECRETISH" }, status: 401 }
+  };
+
+  routes = [refusedToken];
+  const lookup = await fresh.fetch(
+    lookupRequest("FIND {447911123456} IN PHONE FIELDS RETURNING Contact(Id)", tracked()), env, makeCtx());
+  const found = await lookup.json();
+  check(lookup.status === 200, `the lookup still answers 200 (got ${lookup.status})`);
+  check(found.searchRecords?.[0]?.Id?.startsWith("PENDING_CALLER_"),
+    "with a stand-in, so 3CX journals the call and it can be recovered later");
+
+  // Journaling is a different matter: there is nothing useful to answer, so
+  // it fails honestly — but without handing Salesforce's words to 3CX.
+  calls = [];
+  routes = [refusedToken];
+  const journal = await fresh.fetch(taskRequest(callTaskBody("003RING00000001AAA")), env, makeCtx());
+  const body = await journal.text();
+  check(journal.status === 502, `the call log reports the outage (got ${journal.status})`);
+  check(!body.includes("CLIENTSECRETISH") && !body.includes("invalid_client_id"),
+    "and Salesforce's own error text is not passed on");
+  check(!calls.some(taskPost), "nothing is written to Salesforce");
+});
+
+// R7: a 3CX department beats the fallback map, on a Worker that has read one
+await runTest("review: 3CX departments take precedence over EXTENSION_DEPARTMENTS", async () => {
+  const fresh = (await import(new URL("../src/index.js?departments", import.meta.url))).default;
+  const pbx = p => r => r.url.startsWith(`https://pbx.example${p}`);
+  routes = [
+    tokenRoute,
+    { match: pbx("/connect/token"), reply: { access_token: "pbx" } },
+    { match: pbx("/xapi/v1/Groups"), reply: { value: [{ Id: 9, Name: "Larkhall Springs", IsDefault: false }] } },
+    { match: pbx("/xapi/v1/Users"), reply: { value: [{ Number: "102", Name: "A nurse", Groups: [{ GroupId: 9 }] }] } },
+    { match: pbx("/xapi/v1/Queues"), reply: { value: [] } },
+    { match: taskPost, reply: { json: { id: "00TDEPT00000001AA" }, status: 201 } },
+    { match: byId, reply: { records: [ringTimeContact("003RING00000001AAA", "+447911123456")] } },
+    noRecentCall, { match: byTask, reply: { records: [] } },
+    { match: openIntegrationAlert, reply: { records: [] } }, patch204, delete204
+  ];
+  const ctx = makeCtx();
+  await fresh.fetch(taskRequest(callTaskBody("003RING00000001AAA")), {
+    ...env, THREECX_URL: "https://pbx.example", THREECX_CLIENT_ID: "id", THREECX_CLIENT_SECRET: "secret",
+    EXTENSION_DEPARTMENTS: '{"102":"Stale Map Entry"}'
+  }, ctx);
+  await Promise.all(ctx.tasks);
+  const named = contactPatches().find(p => p.body.LastName)?.body.LastName || "";
+  check(named.includes("Larkhall Springs"), `the department wins over the map (got "${named}")`);
+  check(!named.includes("Stale Map Entry"), "and the map is not used when 3CX answered");
+});
+
 // G10 (last, since it sets the External ID aside for the rest of the run):
 // a missing or hidden key field degrades to phone matching instead of stopping creation
 await runTest("gaps: broken External ID field falls back to phone matching", async () => {
@@ -3528,7 +3804,10 @@ await runTest("template: the Worker and the template agree on headers", async ()
   // Headers the template no longer sends, kept only so a PBX on an older
   // template still behaves.
   const legacy = new Set(["X-Auto-Create-Policy", "X-Business-Hours-Start", "X-Business-Hours-End", "X-Business-Days"]);
-  const read = new Set([...workerSource.matchAll(/(?:headers|requestHeaders)\.get\("(X-[A-Za-z-]+)"\)/g)].map(m => m[1]));
+  // Every header name the source mentions, not just the ones read through a
+  // .get() call: several are read through helpers, and scanning call sites
+  // alone let the template drop a header no test would notice.
+  const read = new Set([...workerSource.matchAll(/"(X-[A-Za-z-]+)"/g)].map(m => m[1]));
   read.add("X-Proxy-API-Key");
   const missing = [...read].filter(h => !legacy.has(h) && !templateXml.includes(`<Value Key="${h}">`));
   check(missing.length === 0, `the template sends every header the Worker reads (missing: ${missing.join(", ") || "none"})`);

@@ -27,7 +27,8 @@ Only calls **answered through a tracked queue** create a record for an unknown c
 | Call | What happens |
 |---|---|
 | Unknown caller, answered through a tracked queue | The lookup returns a **New Caller** stand-in. When the call is journaled, the Worker creates the record, named after the home, and links the call to it |
-| Unknown caller, any other route, or nobody answered | The stand-in is dropped at journaling. No record, no call log |
+| Unknown caller, gave up in a tracked queue before anyone answered | A record and a **ring-back reminder** while **Create A Record When An Enquiry Is Missed** is on (the default). Off, the stand-in is dropped and nothing is kept |
+| Unknown caller, any other route | The stand-in is dropped at journaling. No record, no call log |
 | Unknown number, outbound | Nothing is returned, so nothing is logged |
 | Someone who already has a record, any route | Logged against that record while **Always Log Calls For Existing Records** is on (the default) |
 | The same, with Always Log off | Logged only through a tracked queue, plus later legs of a tracked call (a transfer) |
@@ -73,6 +74,8 @@ The number is canonicalised to E.164 (`07700900123` → `+447700900123`) so look
 - **Adds the call to the record's call history**, newest first, in the Description: when, which way, how long, who took it, and the recording link. What was said stays on the call log (see [Retention](#retention))
 - **Notes any name it heard** as an explicitly unverified hint on the reminder. It is **never** written into the name field (see below)
 - **Upserts one open reminder task**, "Action Required: …", asking a human to fill in the details and listing the calls, newest first
+
+**All three stop once the record has real details on it.** They exist to help someone triage an enquiry nobody has picked up yet. As soon as a person replaces the name, the record is theirs: the call is still logged as a Task, any open reminder is **closed**, transcripts written by an older version are trimmed out of the history block, and nothing more is written to the Description. A caller who was already in Salesforce is treated the same way from the first call — logged, never rewritten.
 
 The Description of a new enquiry reads:
 
@@ -180,6 +183,14 @@ Pick the user the integration acts as. Every record it creates will be owned by 
 
 **For a new org, edit [wrangler.toml](wrangler.toml) first.** Change `name` to a new Worker name, and set `SALESFORCE_LOGIN_URL`, `SALESFORCE_ORG_MODEL`, `SALESFORCE_EXTERNAL_ID_FIELD` and `SALESFORCE_HOME_FIELD` for that org (remove `SALESFORCE_HOME_FIELD` if it has no such field). Check the dashboard's `SALESFORCE_FALLBACK_OWNER` and `SALESFORCE_HOME_VALUES` too, since they name users and values in one org. Deploying without changing `name` overwrites the existing Cedar Care Worker.
 
+**Also make your own KV namespace.** The `id` under `[[kv_namespaces]]` is Cedar Care's, and a new org cannot write to it — deploying as-is leaves the diagnostic log and its download page dead, with `no log store is bound to this Worker` in the log. Create one and paste the id it prints:
+
+```bash
+npx wrangler kv namespace create DIAGNOSTIC_LOGS
+```
+
+Nothing else depends on it: with no namespace bound, calls are still looked up, logged and recorded exactly as before.
+
 ```bash
 npm install
 npx wrangler login          # once per machine
@@ -222,7 +233,7 @@ Then fill in, at minimum:
 | Cloudflare Worker URL | From step 2, no trailing slash |
 | Proxy API Key | Must match `PROXY_API_KEY` exactly |
 
-Everything else has a working default. Review [the 3CX settings table](#3cx-settings) for filtering, auto-create policy and transcript handling.
+Everything else has a working default. Review [the 3CX settings table](#3cx-settings) for tracked queues, filtering, what a new enquiry becomes, and transcript handling.
 
 > **Password fields usually come back blank after an upload.** Re-paste the Proxy API Key and save again, otherwise every request returns 401. Re-upload the XML whenever the template version changes, and re-paste the key each time.
 >
@@ -236,7 +247,7 @@ Both PBXs then write into the same Salesforce org, because the credentials and `
 
 > **Think hard before running two.** Two near-identical Worker URLs caused a live misconfiguration here. Pointing a PBX at the wrong one returns 401 when the keys differ, and when they match it silently writes that PBX's calls into the wrong org, which nobody notices until someone goes looking for records that were never created. A second Worker was deleted on 2026-09-08 for exactly this reason.
 
-Per-PBX behaviour still varies independently, because call filtering, auto-create policy and transcript handling are template parameters sent as request headers, not Worker variables. A head office PBX can journal everything while a satellite logs inbound only, off the same Worker.
+Per-PBX behaviour still varies independently, because call filtering, what a new enquiry becomes and transcript handling are template parameters sent as request headers, not Worker variables. A head office PBX can journal everything while a satellite logs inbound only, off the same Worker.
 
 ### Step 4 — Verify
 
@@ -296,29 +307,34 @@ Dashboard changes apply immediately — **no redeploy needed**. Home names are r
 
 *Admin console → Integrations → CRM*
 
+Listed in the order they appear in the console, and worded as the console words them, so a setting can be found by its label. Template v57.
+
 | Setting | Purpose |
 |---|---|
 | Cloudflare Worker URL | Points 3CX at this proxy |
 | Proxy API Key | Must match `PROXY_API_KEY` |
-| Tracked Queues | CSV of queue extensions, e.g. `800, 801` or `80*`. Only calls answered through these create a record for an unknown caller. Blank means nothing is ever created |
-| Excluded Extensions | CSV of extensions or queues, `*` for prefix. Nothing about these calls reaches Salesforce, and it overrides Tracked Queues and Always Log |
-| Always Log Calls For Existing Records | On (default): calls from people already in Salesforce are logged whatever the route. Off: only through a tracked queue |
-| New Enquiries Create Leads | On (default). A new enquiry through a tracked queue becomes a **Lead** |
-| New Enquiries Create Person Accounts | Off (default). On, it **overrides** Leads and the enquiry becomes a **Person Account**. With both off, nothing is created at all, though callers already on file are still logged |
-| Keep Call History On Leads | On (default). Off, a Lead keeps its call logs but no history in its Description |
-| Keep Call History On Person Accounts | **Off** (default). Enquiry Leads keep their history; a converted Person Account stays clean, with its calls on the call logs alone. A template too old to send this leaves it on |
-| Create a record when an enquiry is missed | **On** (default). A caller who gives up in a tracked queue still gets a record and a reminder to ring back. Off, a missed enquiry creates nothing |
-| Raise an Action Required reminder | On (default). Off, records are still created and calls still logged, without the reminder task |
-| Ignore answered calls shorter than N seconds | `0` (default, logs them all). Drops wrong numbers and immediate hang-ups. Missed calls are exempt, since their length is the time they rang |
+| Look callers up in this order | Fixed at `Contacts/Leads/Accounts`. 3CX searches its own lookup scenarios in that order; the Worker's answer decides what is actually matched |
+| Tracked queues — only calls through these create a record | CSV of queue extensions, e.g. `800, 801` or `80*`. Only calls through these create a record for an unknown caller. Blank means nothing is ever created |
+| A new enquiry becomes a Lead | On (default). A new enquiry through a tracked queue becomes a **Lead** |
+| A new enquiry becomes a Person Account instead | Off (default). On, it **overrides** Leads and the enquiry becomes a **Person Account**. With both off, nothing is created at all, though callers already on file are still logged |
+| Create a record when an enquiry is missed, so someone can ring back | **On** (default). A caller who gives up in a tracked queue still gets a record and a reminder. Off, a missed enquiry creates nothing |
+| Log calls from people already in Salesforce, whatever the route | On (default). Off, they are logged only through a tracked queue, plus later legs of a tracked call |
+| Keep a call history on Leads | On (default). Off, a Lead keeps its call logs but no history in its Description |
+| Keep a call history on Person Accounts | **Off** (default). Enquiry Leads keep their history; a converted Person Account stays clean, with its calls on the call logs alone. A template too old to send this leaves it on. The consequence is worth knowing: for a Person Account the calls then exist **only** as call logs, so a retention job that deletes Tasks deletes the whole visible history |
+| Raise an Action Required reminder for an unnamed caller | On (default). Off, records are still created and calls still logged, without the reminder task |
+| Store call transcripts | `Include full transcript` / `Metadata only` / `External inbound only`. `Metadata only` removes the transcript and recording link but still stores 3CX's AI summary and sentiment; use Confidential Extensions where those must go too |
 | Store the recording link | On (default). Off, the link stays in 3CX and never reaches Salesforce |
-| Diagnostic Logging | Off (default). On, the Worker logs what the template sent it and what it decided for each call. Numbers are masked and nothing said on a call is logged, so it is safe to leave on while chasing something |
-| Keep diagnostic logs for N days | `0` (default, keeps none). Stores those lines for that many days, up to 30, so they can be pulled as a text file. See [Pulling the logs](#pulling-the-logs) |
-| Log Answered Inbound / Missed / Answered Outbound / Unanswered Outbound | Per-direction on/off |
-| Internal Extension Max Digits | Numbers this short are internal — never reach Salesforce (default 6) |
-| Excluded Number Prefixes | CSV of your own numbers, e.g. `+441632960001, +4416329600`. Each entry matches every number starting with it, so use whole numbers or tight blocks (the second example covers ten numbers): an area code such as `0117` would drop every caller in that city. Up to 1,000 characters |
-| Confidential Extensions | CSV, e.g. `3020, 4*`. The call is logged; transcript, summary, sentiment and recording link are not |
-| Receptionist Extensions | CSV of digital receptionist and ring group extensions, e.g. `1001, 10*`. Their legs become one line, never name the record, and never count as someone answering a tracked queue. Tracked Queues count automatically |
-| Store Call Transcripts | `Include full transcript` / `Metadata only` / `External inbound only`. `Metadata only` removes the transcript and recording link but still stores 3CX's AI summary and sentiment; use Confidential Extensions where those must go too |
+| Log answered inbound / missed / answered outbound / unanswered outbound calls | Four independent on/off settings, one per call outcome |
+| Ignore answered calls shorter than this many seconds | `0` (default, logs them all). Drops wrong numbers and immediate hang-ups. Missed calls are exempt, since their length is the time they rang |
+| Numbers this short are internal and never reach Salesforce | Default `6`, which covers every 3CX extension. Counted on the number as dialled |
+| Never log numbers starting with | CSV of your own numbers, e.g. `+441632960001, +4416329600`. Each entry matches every number starting with it, so use whole numbers or tight blocks (the second example covers ten numbers): an area code such as `0117` would drop every caller in that city. Up to 1,000 characters |
+| Never log these extensions, whatever else says | CSV of extensions or queues, `*` for prefix. Nothing about these calls reaches Salesforce, and it overrides Tracked Queues and Always Log |
+| Log the call but never its content, for these extensions | CSV, e.g. `3020, 4*`. The call is logged; transcript, summary, sentiment and recording link are not |
+| Digital receptionists and ring groups, which route rather than answer | CSV, e.g. `1001, 10*`. Their legs become one line, never name the record, and never count as someone answering a tracked queue. Tracked Queues count automatically |
+| Diagnostic logging — what the Worker was told and what it decided | Off (default). On, the Worker logs what the template sent it and what it decided for each call. Numbers are masked and nothing said on a call is logged, so it is safe to leave on while chasing something |
+| Keep diagnostic logs for this many days | `0` (default, keeps none). Stores those lines for that many days, up to 30, so they can be pulled as a text file |
+| Log download key | The password for that download. Letters, numbers and dashes, at least six characters. Clearing it revokes access |
+| Log download page | Opens the Worker's own download page. See [Pulling the logs](#pulling-the-logs) |
 
 ---
 
@@ -390,7 +406,14 @@ https://3cx-salesforce-proxy-cedarcare.autumn-truth-82d5.workers.dev/logs
 
 Enter the key once, tick *Remember on this device*, and every visit afterwards downloads the file on its own. Bookmark it: the address holds no secret, because the key is sent as a header and kept in that browser alone.
 
-Pasting the key into the address works too, as `?key=your-phrase`, but a key containing `#` never arrives — a browser keeps everything after a `#` to itself — and `%`, `&`, `+` and spaces mean other things in an address. The **proxy key is refused in an address** either way: that one writes to Salesforce. A key changed in 3CX takes effect on the next call, since that is when the Worker learns it.
+Pasting the key into the address works too, as `?key=your-phrase`, but a key containing `#` never arrives — a browser keeps everything after a `#` to itself — and `%`, `&`, `+` and spaces mean other things in an address. The **proxy key is refused in an address** either way: that one writes to Salesforce.
+
+The Worker only learns the key from a call, since that is when 3CX sends it, so **set it and make one test call before expecting the page to open**. After that:
+
+- a **changed** key is stored on the next call and the old one stops working
+- an **unchanged** key is rewritten at most every ten minutes, so a busy PBX is not storing the same phrase all day
+- **clearing** the field in 3CX revokes it on the next call — the page then opens for nobody
+- a stored key expires with the logs it unlocks, at most 30 days, so a forgotten key does not outlive them
 
 Each entry holds what the template sent, what the call was, what was decided and anything that failed. Numbers are masked and nothing said on a call is stored, so it is safe to hand the file to someone. Every kept call costs one write to Cloudflare KV, so leave the setting at 0 unless you are chasing something.
 
@@ -409,7 +432,9 @@ Adding the call to the record and upserting the reminder happen *after* the call
 
 Failures now raise a **`3CX Integration Error:` task** on the affected record, high priority, one per record rather than one per call. It uses a different subject from the caller reminders deliberately, so the reminder upsert cannot overwrite it and the auto-close cannot silently clear it.
 
-Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce itself being down, since a Salesforce outage is exactly when a Salesforce task cannot be created. The webhook is also the only place problems with no record to hang a task on are reported: an enquiry through a tracked queue that could not be given a record, an optional field or value Salesforce refused on a new record, a new record the integration user could not read back, and a refused fallback owner. Webhook reports are sent after the response to 3CX, so a slow webhook never delays a call.
+Two more reach Salesforce even with no record to hang them on, as tasks owned by whoever took the call: an enquiry through a tracked queue that could not be given a record (*3CX Integration Error: enquiry call saved without a record*), and a call log the Worker had to save unlinked (*… call saved without its caller's record*). A record that *was* created but is missing an optional field or value Salesforce refused raises *… new enquiry is missing details* on the record itself. Every one of them starts `3CX Integration Error:`, so a list view finds the lot.
+
+Set `ALERT_WEBHOOK_URL` as well if you want a signal that survives Salesforce itself being down, since a Salesforce outage is exactly when a Salesforce task cannot be created. It is also the only place, besides the Worker's log, that reports the two failures with nothing at all to attach to: a new record the integration user could not read back, and a refused `SALESFORCE_FALLBACK_OWNER`. Webhook reports are sent after the response to 3CX, so a slow webhook never delays a call.
 
 ---
 

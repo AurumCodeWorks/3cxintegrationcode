@@ -255,10 +255,18 @@ let recordCheckDone = false;
  * changes, because field access follows the user and not the app.
  */
 async function runFieldCheck(env, instanceUrl) {
+  // Whatever the org has been told to stamp on a record is checked as well, so
+  // a field added through SALESFORCE_EXTRA_FIELDS is answered for before the
+  // first enquiry needs it rather than through a missing-details task after.
+  const withConfigured = (objectType, fields) =>
+    [...new Set([...fields, ...Object.keys(extraFields(env, objectType))].filter(Boolean))];
+
   const wanted = {
-    Contact: ["Description", "MobilePhone", "IsPersonAccount", externalIdField(env)],
-    Account: ["PersonContactId", "PersonMobilePhone", "PersonHomePhone", "PersonOtherPhone", "Description", "RecordTypeId", externalIdField(env)],
-    Lead: ["Description", "MobilePhone", "IsConverted", "ConvertedContactId", (env.SALESFORCE_HOME_FIELD || "").trim(), "LeadSource", externalIdField(env)],
+    Contact: withConfigured("Contact", ["Description", "MobilePhone", "IsPersonAccount", externalIdField(env)]),
+    Account: withConfigured("Account", ["PersonContactId", "PersonMobilePhone", "PersonHomePhone", "PersonOtherPhone",
+      "Description", "RecordTypeId", externalIdField(env)]),
+    Lead: withConfigured("Lead", ["Description", "MobilePhone", "IsConverted", "ConvertedContactId",
+      (env.SALESFORCE_HOME_FIELD || "").trim(), "LeadSource", externalIdField(env)]),
     Task: ["Description", "WhoId", "OwnerId", "CallDurationInSeconds", "CreatedById"]
   };
 
@@ -681,7 +689,14 @@ function homeFields(env, home) {
   if (!map || typeof map !== "object") return { [field]: home };
 
   const key = Object.keys(map).find(k => k.trim().toLowerCase() === home.toLowerCase());
-  return { [field]: key === undefined ? home : String(map[key]) };
+  if (key === undefined) return { [field]: home };
+
+  // A department mapped to nothing has no home to record. A central placement
+  // line can quote for any home, so the enquiry belongs to none of them yet:
+  // the field is left for a person to set rather than filled in with wherever
+  // the call happened to land. The record is still named after the route.
+  const value = String(map[key]).trim();
+  return value ? { [field]: value } : {};
 }
 
 // Fields a record is created with whatever the org's setup: its name, number,
@@ -956,7 +971,25 @@ const requestHandler = {
       //    only when a token is fetched, so a wrong one shows up straight away
       //    rather than when the cached token next expires.
       salesforceLoginUrl(env);
-      const { accessToken, instanceUrl } = await getSalesforceToken(env);
+
+      const isLookupRequest = /^\/services\/data\/v\d+\.\d+\//.test(path) &&
+        /\/search\/?$/.test(path) && request.method === "GET";
+
+      let accessToken, instanceUrl;
+      try {
+        ({ accessToken, instanceUrl } = await getSalesforceToken(env));
+      } catch (error) {
+        // A lookup must not come back as an error even when the token itself
+        // is the problem: 3CX refuses to journal a call whose lookup failed,
+        // so a Salesforce hiccup at ring time would cost the enquiry outright.
+        // Answered as "nobody matched" instead — 3CX journals the call, and
+        // the journal (minutes later, often a fresh token) still records it.
+        if (isLookupRequest) {
+          console.error("No Salesforce token for a lookup, answering 3CX as if nobody matched:", error.message);
+          return lookupFallback(env, requestUrl, request.headers);
+        }
+        throw error;
+      }
 
       // A one-off answer to "has the run-as user got the fields it needs",
       // written to the log after the response so no call waits for it.
@@ -1060,7 +1093,7 @@ const requestHandler = {
       // up here, and all of them must come out as "nobody matched".
       if (isDataPath && /\/search\/?$/.test(path) && request.method === "GET") {
         try {
-          return await handleLookupProxy(env, targetUrl, forwardHeaders, request.headers);
+          return await handleLookupProxy(env, targetUrl, forwardHeaders, request.headers, requestUrl);
         } catch (error) {
           console.error("Lookup failed outright, answering 3CX as if nobody matched:", error);
           return lookupFallback(env, requestUrl, request.headers);
@@ -1759,14 +1792,19 @@ function splitCallSections(description) {
  * Filtering these keeps internal transfers, and their transcripts, out of
  * the CRM entirely.
  */
-function isFilteredNumber(phone, headers) {
+function isFilteredNumber(phone, headers, asDialled) {
   const digits = (normalizePhone(phone) || "").replace(/[^0-9]/g, "");
   if (!digits) return true;
 
   // Internal extensions: anything at or below the configured digit count.
+  // Counted on the number as dialled where the caller knows it, because
+  // normalizePhone expands anything of seven digits or more into a national
+  // number: a site setting the limit to 7 would otherwise be comparing
+  // against a ten-digit E.164 form and filtering nothing.
+  const dialled = String(asDialled ?? phone ?? "").replace(/[^0-9]/g, "");
   let maxInternal = Number(headers.get("X-Internal-Max-Digits") || "6");
   if (isNaN(maxInternal) || maxInternal < 0) maxInternal = 6;
-  if (digits.length <= maxInternal) return true;
+  if (digits.length <= maxInternal || (dialled && dialled.length <= maxInternal)) return true;
 
   // Admin-listed prefixes (CSV), matched against the canonical E.164 form so
   // "07393...", "447393..." and "+447393..." all compare alike.
@@ -1938,6 +1976,21 @@ function extractNameFromTranscription(transcription) {
  * between 3CX journaling the call, which the Worker can act on later, and
  * discarding it with its transcript.
  */
+/**
+ * The term 3CX actually searched for, before this proxy rewrote it into
+ * E.164. Only the original says how many digits were dialled.
+ */
+function searchedTerm(requestUrl) {
+  try {
+    if (!requestUrl) return "";
+    const url = typeof requestUrl === "string" ? new URL(requestUrl) : requestUrl;
+    const match = (url.searchParams.get("q") || "").match(/FIND\s+\{(.*?)\}/i);
+    return match ? match[1] : "";
+  } catch (e) {
+    return "";
+  }
+}
+
 function lookupFallback(env, requestUrl, requestHeaders) {
   try {
     const query = requestUrl.searchParams.get("q") || "";
@@ -1945,7 +1998,8 @@ function lookupFallback(env, requestUrl, requestHeaders) {
     const phone = phoneMatch ? normalizePhone(phoneMatch[1]).replace(/[^0-9+]/g, "") : "";
     const outbound = /^outbound$/i.test((requestHeaders.get("X-Call-Direction") || "").trim());
 
-    if (phone && /[0-9]{4,}/.test(phone) && !outbound && !isFilteredNumber(phone, requestHeaders) &&
+    if (phone && /[0-9]{4,}/.test(phone) && !outbound &&
+        !isFilteredNumber(phone, requestHeaders, searchedTerm(requestUrl)) &&
         trackedQueuesConfigured(requestHeaders) && trackedQueueList(requestHeaders).length > 0 && creationAllowed(env)) {
       return pendingCallerMatch(phone);
     }
@@ -1955,7 +2009,7 @@ function lookupFallback(env, requestUrl, requestHeaders) {
   return jsonResponse({ searchRecords: [] }, 200, { "Cache-Control": "no-store" });
 }
 
-async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders) {
+async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders, requestUrl) {
   const response = await forwardWithAuthRetry(env, targetUrl, {
     method: "GET",
     headers: forwardHeaders
@@ -2000,7 +2054,10 @@ async function handleLookupProxy(env, targetUrl, forwardHeaders, requestHeaders)
       // Returning the empty result also stops 3CX journaling the call at
       // all: the template's CreateCallActivity scenario is skipped when
       // EntityId is blank, so the transcript never reaches Salesforce.
-      if (isFilteredNumber(phone, requestHeaders)) {
+      // The number as 3CX dialled it, not the E.164 form this proxy rewrote
+      // the search to: "is it short enough to be an extension" can only be
+      // asked of the original.
+      if (isFilteredNumber(phone, requestHeaders, searchedTerm(requestUrl))) {
         console.log(`Filtered number ${maskPhone(phone)} — no record created, journaling suppressed.`);
         return jsonResponse(data, lookupStatus);
       }
